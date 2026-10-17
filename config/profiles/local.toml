@@ -1,0 +1,5 @@
+[asr]
+provider = "qwen3-local"
+
+[mt]
+provider = "qwen3-local"

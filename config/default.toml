@@ -1,0 +1,65 @@
+[app]
+profile = "local"
+
+[audio]
+source = "loopback"
+frame_ms = 20
+target_rate = 16000
+speed = 1.0
+
+[segment]
+silence_ms = 450
+min_speech_ms = 300
+max_segment_s = 10.0
+preroll_ms = 200
+draft_interval_ms = 900
+vad_floor = 0.0003
+vad_ratio = 3.0
+carry_ttl_s = 20.0
+carry_min_chars = 12
+carry_max_chars = 200
+carry_max_words = 8
+# false: 忠于 ASR 输出，只做机械处理（标点切句、长度上限、去重）
+semantic_heuristics = false
+
+[asr]
+provider = "qwen3-local"
+language = ""
+
+[asr.providers.qwen3-local]
+type = "openai-chat"
+base_url = "http://127.0.0.1:8091"
+model = "qwen3-asr"
+max_tokens = 512
+timeout_s = 30.0
+
+[mt]
+provider = "qwen3-local"
+target_lang = "简体中文"
+context_sentences = 2
+emit_interval_ms = 180
+enabled = true
+
+[mt.providers.qwen3-local]
+type = "openai-chat"
+base_url = "http://127.0.0.1:8092"
+model = "qwen3.5-9b"
+max_tokens = 256
+draft_max_tokens = 96
+timeout_s = 60.0
+thinking = false
+
+[mt.providers.deepseek]
+type = "openai-chat"
+base_url = "https://api.deepseek.com/v1"
+model = "deepseek-chat"
+api_key_env = "DEEPSEEK_API_KEY"
+max_tokens = 256
+draft_max_tokens = 96
+timeout_s = 60.0
+thinking = false
+
+[hub]
+host = "127.0.0.1"
+port = 8765
+snapshot_size = 120

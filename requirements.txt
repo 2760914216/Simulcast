@@ -1,0 +1,6 @@
+numpy>=2.0
+httpx>=0.27
+soundcard>=0.4.4
+soxr>=0.5
+websockets>=13
+pyside6>=6.7

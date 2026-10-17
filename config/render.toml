@@ -1,0 +1,21 @@
+[window]
+font_size = 34
+width_ratio = 0.74
+history_lines = 1
+anchor_x = 0.5
+bottom_margin = 92
+show_source = true
+handle_size = 14
+
+[theme]
+bg = [12, 12, 14, 216]
+border = [255, 255, 255, 28]
+dot_on = [255, 255, 255, 235]
+dot_off = [74, 74, 78, 220]
+dot_halo = [255, 255, 255, 46]
+text_final = "#FFFFFF"
+text_draft = "#E4E4E8"
+text_tail = "#8A8A90"
+source = "#9A9AA0"
+placeholder = "#6E6E73"
+radius = 26

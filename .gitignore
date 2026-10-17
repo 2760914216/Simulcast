@@ -1,0 +1,21 @@
+__pycache__/
+*.pyc
+.venv/
+.idea/
+logs/
+runs/
+test/*.wav
+
+# 本机专用，不进仓库
+scripts/serve-local.sh
+config/local.toml
+AGENTS.md
+PLAN.md
+test/tts.ps1
+test/concat.py
+test/trim.py
+test/probe_asr.py
+test/test_capture.py
+test/test_qt.py
+test/test_render_shot.py
+test/test_render_live.py
