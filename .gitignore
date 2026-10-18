@@ -7,7 +7,7 @@ runs/
 test/*.wav
 
 # 本机专用，不进仓库
-scripts/serve-local.sh
+scripts/serve-local.*
 config/local.toml
 AGENTS.md
 PLAN.md

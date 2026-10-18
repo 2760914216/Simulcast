@@ -8,7 +8,6 @@ if not exist ".venv\Scripts\python.exe" (
 )
 set SRC=%1
 if "%SRC%"=="" set SRC=loopback
-echo [simulcast] make sure your LLM endpoints are up (scripts\serve-local.sh or cloud profile)
 if /I "%SRC%"=="both" echo [simulcast] loopback + microphone
 echo [simulcast] starting subtitle renderer...
 start "" ".venv\Scripts\pythonw.exe" -m simulcast.render.qt --ws ws://127.0.0.1:8765

@@ -1,4 +1,5 @@
 # Simulcast · 同声传译
+
 - 这写的很 deepseek (吐槽)
 
 Windows 桌面端、本地优先的实时同声传译：把系统内录（或麦克风）里的英/日语，边说边变成中文字幕。
@@ -45,18 +46,16 @@ uv pip install --python .venv/Scripts/python.exe -r requirements.txt
 
 ### 2. 启动模型服务
 
-应用**不负责**拉起进程，只要端点可达。两个本地服务示例：
+应用**不负责**启动服务，需手动开启，示例：
 
 ```bash
-llama-server -m <models>/Qwen3-ASR-GGUF/Qwen3-ASR-1.7B-Q8_0.gguf \
-             -mm <models>/Qwen3-ASR-GGUF/Qwen3-ASR-1.7B-mmproj-f16.gguf \
+llama-server -m Qwen3-ASR-1.7B-Q8_0.gguf \
+             -mm Qwen3-ASR-1.7B-mmproj-f16.gguf \
              --host 127.0.0.1 --port 8091 -ngl 99 -c 4096 --jinja
 
-llama-server -m <models>/Qwen3.5/gguf/Qwen3.5-9B-Q4_K_M.gguf \
+llama-server -m Qwen3.5-9B-Q4_K_M.gguf \
              --host 127.0.0.1 --port 8092 -ngl 99 -c 4096 --jinja -fa on
 ```
-
-本机可以写一个 `scripts/serve-local.sh`（仓库已 gitignore）把两条命令和 `trap kill` 放在一起，按需修改端口和模型路径。
 
 ### 3. 运行
 
