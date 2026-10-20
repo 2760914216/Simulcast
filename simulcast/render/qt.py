@@ -14,6 +14,7 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction, QActionGroup, QColor, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
+from ..protocol import PROTOCOL_VERSION
 from . import theme
 from .client import mirror
 from .handle import DragHandle
@@ -110,6 +111,9 @@ class RendererApp:
         self.win: SubtitleWindow | None = None
         self.handle: DragHandle | None = None
         self.tray: QSystemTrayIcon | None = None
+        self.outbox: queue.Queue = queue.Queue()
+        self._choice: dict[str, str | None] = {"loopback": None, "mic": None}
+        self._devices: list[dict] | None = None
         self._demo_step = 0
 
     def run(self) -> int:
@@ -191,6 +195,10 @@ class RendererApp:
             handle_group.addAction(action)
             handle_menu.addAction(action)
 
+        self.capture_menu = menu.addMenu("采集设备")
+        self.capture_menu.aboutToShow.connect(lambda: self._rebuild_capture_menu(self.capture_menu))
+        self._rebuild_capture_menu(self.capture_menu)
+
         menu.addSeparator()
         source_action = QAction("显示原文", menu, checkable=True)
         source_action.setChecked(self.show_source)
@@ -205,6 +213,53 @@ class RendererApp:
         self.tray.setContextMenu(menu)
         self.tray.activated.connect(self._on_tray_activated)
         self.tray.show()
+
+    def _device_items(self) -> list[dict]:
+        if self._devices is None:
+            try:
+                from ..audio.devices import list_inputs
+
+                self._devices = list_inputs()
+            except Exception:
+                self._devices = []
+        return self._devices
+
+    def _rebuild_capture_menu(self, menu: QMenu) -> None:
+        self._devices = None
+        menu.clear()
+        items = self._device_items()
+        for kind, label in (("loopback", "系统声音"), ("mic", "麦克风")):
+            sub = menu.addMenu(label)
+            group = QActionGroup(sub)
+            group.setExclusive(True)
+            auto = QAction("跟随系统默认", sub, checkable=True)
+            auto.setChecked(self._choice[kind] is None)
+            auto.triggered.connect(lambda _=False, k=kind: self._choose_device(k, None))
+            group.addAction(auto)
+            sub.addAction(auto)
+            sub.addSeparator()
+            for item in items:
+                if bool(item.get("loopback")) != (kind == "loopback"):
+                    continue
+                name = str(item["name"])
+                device = str(item["id"])
+                action = QAction(name, sub, checkable=True)
+                action.setChecked(self._choice[kind] == device)
+                action.triggered.connect(lambda _=False, k=kind, d=device: self._choose_device(k, d))
+                group.addAction(action)
+                sub.addAction(action)
+
+    def _choose_device(self, kind: str, device: str | None) -> None:
+        self._choice[kind] = device
+        self.outbox.put(
+            {
+                "v": PROTOCOL_VERSION,
+                "type": "control",
+                "action": "capture.device",
+                "kind": kind,
+                "device": device,
+            }
+        )
 
     def _on_tray_activated(self, reason) -> None:
         if reason == QSystemTrayIcon.Trigger:
@@ -278,7 +333,7 @@ class RendererApp:
             self.queue.put((STATUS, connected))
 
         try:
-            asyncio.run(mirror(self.ws, on_msg, on_status=on_status))
+            asyncio.run(mirror(self.ws, on_msg, on_status=on_status, outbox=self.outbox))
         except Exception:
             pass
 

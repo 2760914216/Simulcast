@@ -43,15 +43,11 @@ async def file_frames(
 
 
 async def live_frames(
-    device: str | None,
-    loopback: bool,
-    frame_ms: int = 20,
-    target_rate: int = 16000,
+    capture: LiveCapture,
     max_seconds: float | None = None,
 ) -> AsyncIterator[tuple[float, np.ndarray]]:
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue = asyncio.Queue(maxsize=128)
-    capture = LiveCapture(device=device, loopback=loopback, frame_ms=frame_ms, target_rate=target_rate)
 
     def push(t: float, frame: np.ndarray) -> None:
         if queue.full():

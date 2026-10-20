@@ -2,21 +2,26 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any
+from typing import Any, Callable
 
 from websockets.asyncio.server import ServerConnection, serve
 
 from .config import HubCfg
-from .protocol import encode, snapshot_msg
+from .protocol import decode, encode, snapshot_msg
 
 log = logging.getLogger(__name__)
 
 
 class Hub:
-    """WebSocket fan-out. Protocol v1, JSON per frame, caption upserts by id."""
+    """WebSocket fan-out. Protocol v1, JSON per frame, caption upserts by id.
+
+    Clients may also send control frames back (device switching); they are handed to
+    on_control, which runs on the hub's event loop.
+    """
 
     def __init__(self, cfg: HubCfg):
         self.cfg = cfg
+        self.on_control: Callable[[dict[str, Any]], None] | None = None
         self._clients: set[ServerConnection] = set()
         self._captions: dict[str, dict[str, Any]] = {}
         self._server = None
@@ -37,12 +42,26 @@ class Hub:
         try:
             caps = list(self._captions.values())[-self.cfg.snapshot_size :]
             await ws.send(encode(snapshot_msg(caps)))
-            async for _ in ws:
-                pass
+            async for raw in ws:
+                self._control(raw)
         except Exception:
             pass
         finally:
             self._clients.discard(ws)
+
+    def _control(self, raw: Any) -> None:
+        if self.on_control is None:
+            return
+        try:
+            msg = decode(raw if isinstance(raw, str) else raw.decode("utf-8"))
+        except Exception:
+            return
+        if msg.get("type") != "control":
+            return
+        try:
+            self.on_control(msg)
+        except Exception:
+            log.exception("control handler failed")
 
     def publish(self, msg: dict[str, Any]) -> None:
         if msg.get("type") == "caption" and msg.get("id"):

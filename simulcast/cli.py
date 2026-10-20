@@ -6,6 +6,7 @@ import logging
 import sys
 
 from .asr import build_asr
+from .audio.capture import LiveCapture
 from .config import ConfigError, load
 from .hub import Hub
 from .mt import build_mt
@@ -57,6 +58,19 @@ def _parser() -> argparse.ArgumentParser:
     e.add_argument("-o", "--out", default=None)
 
     return p
+
+
+def _apply_control(captures: dict[str, LiveCapture], msg: dict) -> None:
+    if msg.get("action") != "capture.device":
+        return
+    kind = str(msg.get("kind") or "loopback")
+    capture = captures.get(kind)
+    if capture is None:
+        log.info("ignoring %s device change: source not active", kind)
+        return
+    device = msg.get("device") or None
+    log.info("capture %s -> %s", kind, device or "system default")
+    capture.set_device(device)
 
 
 async def _cmd_run(args) -> int:
@@ -116,32 +130,26 @@ async def _cmd_run(args) -> int:
             ]
         else:
             source = args.live or cfg.audio.source
-            loopback_arg = source in ("both", "loopback", "file")
-            tasks = []
-            if loopback_arg:
-                tasks.append(
-                    asyncio.create_task(
-                        orch.run(
-                            live_frames(None, True, cfg.audio.frame_ms, cfg.audio.target_rate, args.max_seconds),
-                            source="loopback",
-                        )
-                    )
+            captures: dict[str, LiveCapture] = {}
+            if source in ("both", "loopback"):
+                captures["loopback"] = LiveCapture(
+                    loopback=True,
+                    frame_ms=cfg.audio.frame_ms,
+                    target_rate=cfg.audio.target_rate,
                 )
             if source in ("both", "mic"):
-                tasks.append(
-                    asyncio.create_task(
-                        orch.run(
-                            live_frames(
-                                args.device or cfg.audio.device,
-                                False,
-                                cfg.audio.frame_ms,
-                                cfg.audio.target_rate,
-                                args.max_seconds,
-                            ),
-                            source="mic",
-                        )
-                    )
+                captures["mic"] = LiveCapture(
+                    device=args.device or cfg.audio.device,
+                    loopback=False,
+                    frame_ms=cfg.audio.frame_ms,
+                    target_rate=cfg.audio.target_rate,
                 )
+            if hub is not None:
+                hub.on_control = lambda msg: _apply_control(captures, msg)
+            tasks = [
+                asyncio.create_task(orch.run(live_frames(capture, args.max_seconds), source=kind))
+                for kind, capture in captures.items()
+            ]
 
         await sink.emit(session_msg("running", sid, detail=f"source={source}"))
         await asyncio.gather(*tasks)
