@@ -4,7 +4,7 @@ import argparse
 import asyncio
 import sys
 
-from .client import mirror
+from ..wsclient import mirror
 
 
 class Renderer:

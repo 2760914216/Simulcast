@@ -68,12 +68,12 @@ def test_settings_roundtrip(tmp=None):
     import tempfile
     from pathlib import Path
 
-    from simulcast.render import qt
+    from simulcast import store
 
     with tempfile.TemporaryDirectory() as tmpdir:
         os.environ["APPDATA"] = tmpdir
-        qt.save_settings({"font_size": 42, "width_ratio": 0.9, "show_source": False})
-        loaded = qt.load_settings()
+        store.save_render({"font_size": 42, "width_ratio": 0.9, "show_source": False})
+        loaded = store.load_render()
         assert loaded["font_size"] == 42 and abs(loaded["width_ratio"] - 0.9) < 1e-6
         assert Path(tmpdir, "simulcast", "render.json").exists()
     print("ok test_settings_roundtrip")

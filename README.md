@@ -31,6 +31,17 @@ WASAPI loopback ┐
                                                                               └─► JSONL / SRT / MD
 ```
 
+三个进程，各司其职：
+
+| 进程 | 入口 | 职责 |
+|---|---|---|
+| 总管 | `python -m simulcast.app` | 托盘、子进程生命周期、配置下发、单实例 |
+| 识别引擎 | `python -m simulcast.cli run --live … --ws` | 采集 → 识别 → 翻译 → 字幕事件 |
+| 字幕引擎 | `python -m simulcast.render.qt` | 订阅协议，渲染悬浮字幕 |
+
+总管用 Windows Job Object 把两个引擎绑在自己身上：总管被强杀时引擎一起退出，不留孤儿进程。
+第二次启动只唤醒已有实例，然后自己退出。
+
 ## 快速开始
 
 ### 1. 环境
@@ -60,10 +71,10 @@ llama-server -m Qwen3.5-9B-Q4_K_M.gguf \
 ### 3. 运行
 
 ```bat
-run.bat            :: 内录 + 悬浮字幕
-run.bat mic        :: 麦克风
-run.bat both       :: 两路同时
+run.bat            :: 启动总管（托盘 + 两个引擎）
 ```
+
+内录 / 麦克风 / 双路在托盘「识别 → 采集源」里切换，切换会重启识别引擎。也可以直接起引擎：
 
 或直接命令行：
 
@@ -85,8 +96,8 @@ config/
 └─ render.toml           # 渲染端出厂默认（窗口 + 主题）
 ```
 
-加载顺序：`default.toml` → `profiles/<name>.toml`（深合并，只写差异）。渲染端的托盘设置写在
-`%APPDATA%\simulcast\render.json`，覆盖 `render.toml`，仓库里的默认值不会被改写。
+加载顺序：`default.toml` → `profiles/<name>.toml`（深合并，只写差异）。字幕端的样式写在
+`%APPDATA%\simulcast\render.json`：字幕引擎负责落盘，总管读取后显示为勾选状态，覆盖 `render.toml`。
 
 ### provider
 
@@ -153,9 +164,12 @@ WebSocket `ws://127.0.0.1:8765`，每帧一个 UTF-8 JSON，**按 id upsert**，
 - 当前句：原文小字 + 译文大字；可选择保留 0/1/2 句历史（只留译文，单行省略）。
 - 稳定前缀亮色、未定尾巴灰色；180 ms 合并窗口，final 立即生效。
 - 卡片点击穿透；右侧圆形拖拽点可移动位置，位置按"横向比例 + 底部距离"保存。
-- 托盘：采集设备、字号、宽度、历史句数、拖拽点大小、显示原文、退出；单击托盘图标显示/隐藏。
+- 托盘属于总管，分两组：
+  - **字幕**：字号、宽度、历史句数、拖拽点大小、显示原文、重启/停止字幕引擎
+  - **识别**：采集源、系统声音与麦克风设备、重启/停止识别引擎
+- 样式改动经 WebSocket 控制帧下发（`target=render`），字幕引擎应用后落盘到 `render.json`。
 - 采集设备：默认跟随 Windows 的默认输出设备，换耳机/切显示器后自动重开流（约 0.3-1 s 空档）；
-  也可在托盘中指定设备固定下来，选择优先于自动跟随。
+  也可在托盘里指定设备固定下来，选择优先于自动跟随（控制帧 `target=pipeline`）。
 
 ## CLI
 
@@ -209,12 +223,13 @@ done
 
 ```
 simulcast/
+  app/       tray supervisor __main__（总管：托盘 + 生命周期）
   audio/     devices capture vad segmenter wavio
   asr/       base（协议 + Streaming 扩展点） openai_chat
   mt/        base openai_chat prompts sanitize
   pipeline/  sentences orchestrator（双轨调度、背压、上下文）
-  render/    client model textblock overlay handle theme qt cli
-  protocol.py hub.py sink.py sources.py cli.py
+  render/    model textblock overlay handle theme qt cli
+  protocol.py hub.py sink.py sources.py cli.py single.py store.py wsclient.py
 config/      default.toml profiles/ render.toml
 test/        单元与集成测试
 run.bat devices.bat

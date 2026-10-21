@@ -2,29 +2,29 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import json
-import os
+import logging
 import queue
 import sys
 import threading
 import tomllib
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QAction, QActionGroup, QColor, QIcon, QPainter, QPixmap
-from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
+from PySide6.QtCore import QTimer
+from PySide6.QtWidgets import QApplication
 
-from ..protocol import PROTOCOL_VERSION
+from ..single import acquire
+from ..store import load_render, save_render
+from ..wsclient import mirror
 from . import theme
-from .client import mirror
 from .handle import DragHandle
 from .model import CaptionStore
 from .overlay import SubtitleWindow
 
-STATUS = "__status__"
+log = logging.getLogger(__name__)
 
-FONT_CHOICES = (26, 30, 34, 42, 52)
-WIDTH_CHOICES = ((0.60, "60%"), (0.74, "75%"), (0.90, "90%"))
+ROOT = Path(__file__).resolve().parents[2]
+INSTANCE = "simulcast-render"
+STATUS = "__status__"
 
 DEMO = [
     ("Welcome to Business Matters.", "欢迎来到《商业事务》。"),
@@ -36,9 +36,6 @@ DEMO = [
 ]
 
 
-ROOT = Path(__file__).resolve().parents[2]
-
-
 def load_render_config() -> dict:
     path = ROOT / "config" / "render.toml"
     if not path.exists():
@@ -47,41 +44,6 @@ def load_render_config() -> dict:
         return tomllib.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return {}
-
-
-def settings_path() -> Path:
-    base = os.environ.get("APPDATA") or str(Path.home())
-    return Path(base) / "simulcast" / "render.json"
-
-
-def load_settings() -> dict:
-    try:
-        return json.loads(settings_path().read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-
-
-def save_settings(data: dict) -> None:
-    try:
-        path = settings_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    except Exception:
-        pass
-
-
-def make_icon() -> QIcon:
-    pixmap = QPixmap(64, 64)
-    pixmap.fill(Qt.transparent)
-    painter = QPainter(pixmap)
-    painter.setRenderHint(QPainter.Antialiasing, True)
-    painter.setPen(Qt.NoPen)
-    painter.setBrush(QColor(255, 255, 255))
-    painter.drawEllipse(12, 12, 40, 40)
-    painter.setBrush(QColor(28, 28, 30))
-    painter.drawEllipse(26, 26, 12, 12)
-    painter.end()
-    return QIcon(pixmap)
 
 
 class RendererApp:
@@ -110,14 +72,9 @@ class RendererApp:
         self.store = CaptionStore()
         self.win: SubtitleWindow | None = None
         self.handle: DragHandle | None = None
-        self.tray: QSystemTrayIcon | None = None
-        self.outbox: queue.Queue = queue.Queue()
-        self._choice: dict[str, str | None] = {"loopback": None, "mic": None}
-        self._devices: list[dict] | None = None
         self._demo_step = 0
 
-    def run(self) -> int:
-        app = QApplication.instance() or QApplication(sys.argv)
+    def run(self, app: QApplication) -> int:
         app.setApplicationName("simulcast")
         app.setQuitOnLastWindowClosed(False)
 
@@ -135,7 +92,6 @@ class RendererApp:
         self.handle = DragHandle(self.win, size=self.handle_size, on_release=self._persist)
         self.handle.show()
         self.handle.follow()
-        self._build_tray(app)
 
         timer = QTimer()
         timer.timeout.connect(self._drain)
@@ -150,170 +106,51 @@ class RendererApp:
 
         return app.exec()
 
-    def _build_tray(self, app: QApplication) -> None:
-        self.tray = QSystemTrayIcon(make_icon(), app)
-        self.tray.setToolTip("Simulcast 字幕")
-
-        menu = QMenu()
-        font_menu = menu.addMenu("字号")
-        font_group = QActionGroup(font_menu)
-        font_group.setExclusive(True)
-        for size in FONT_CHOICES:
-            action = QAction(f"{size} px", font_menu, checkable=True)
-            action.setChecked(size == self.font_size)
-            action.triggered.connect(lambda _=False, value=size: self._set_font(value))
-            font_group.addAction(action)
-            font_menu.addAction(action)
-
-        width_menu = menu.addMenu("宽度")
-        width_group = QActionGroup(width_menu)
-        width_group.setExclusive(True)
-        for ratio, label in WIDTH_CHOICES:
-            action = QAction(label, width_menu, checkable=True)
-            action.setChecked(abs(ratio - self.width_ratio) < 0.01)
-            action.triggered.connect(lambda _=False, value=ratio: self._set_width(value))
-            width_group.addAction(action)
-            width_menu.addAction(action)
-
-        history_menu = menu.addMenu("历史句数")
-        history_group = QActionGroup(history_menu)
-        history_group.setExclusive(True)
-        for count, label in ((0, "关闭"), (1, "1 句"), (2, "2 句")):
-            action = QAction(label, history_menu, checkable=True)
-            action.setChecked(count == self.history_lines)
-            action.triggered.connect(lambda _=False, value=count: self._set_history_lines(value))
-            history_group.addAction(action)
-            history_menu.addAction(action)
-
-        handle_menu = menu.addMenu("拖拽点")
-        handle_group = QActionGroup(handle_menu)
-        handle_group.setExclusive(True)
-        for size, label in ((10, "小"), (14, "中"), (20, "大")):
-            action = QAction(label, handle_menu, checkable=True)
-            action.setChecked(size == self.handle_size)
-            action.triggered.connect(lambda _=False, value=size: self._set_handle_size(value))
-            handle_group.addAction(action)
-            handle_menu.addAction(action)
-
-        self.capture_menu = menu.addMenu("采集设备")
-        self.capture_menu.aboutToShow.connect(lambda: self._rebuild_capture_menu(self.capture_menu))
-        self._rebuild_capture_menu(self.capture_menu)
-
-        menu.addSeparator()
-        source_action = QAction("显示原文", menu, checkable=True)
-        source_action.setChecked(self.show_source)
-        source_action.triggered.connect(lambda checked: self._set_source(checked))
-        menu.addAction(source_action)
-
-        menu.addSeparator()
-        quit_action = QAction("退出", menu)
-        quit_action.triggered.connect(app.quit)
-        menu.addAction(quit_action)
-
-        self.tray.setContextMenu(menu)
-        self.tray.activated.connect(self._on_tray_activated)
-        self.tray.show()
-
-    def _device_items(self) -> list[dict]:
-        if self._devices is None:
-            try:
-                from ..audio.devices import list_inputs
-
-                self._devices = list_inputs()
-            except Exception:
-                self._devices = []
-        return self._devices
-
-    def _rebuild_capture_menu(self, menu: QMenu) -> None:
-        self._devices = None
-        menu.clear()
-        items = self._device_items()
-        for kind, label in (("loopback", "系统声音"), ("mic", "麦克风")):
-            sub = menu.addMenu(label)
-            group = QActionGroup(sub)
-            group.setExclusive(True)
-            auto = QAction("跟随系统默认", sub, checkable=True)
-            auto.setChecked(self._choice[kind] is None)
-            auto.triggered.connect(lambda _=False, k=kind: self._choose_device(k, None))
-            group.addAction(auto)
-            sub.addAction(auto)
-            sub.addSeparator()
-            for item in items:
-                if bool(item.get("loopback")) != (kind == "loopback"):
-                    continue
-                name = str(item["name"])
-                device = str(item["id"])
-                action = QAction(name, sub, checkable=True)
-                action.setChecked(self._choice[kind] == device)
-                action.triggered.connect(lambda _=False, k=kind, d=device: self._choose_device(k, d))
-                group.addAction(action)
-                sub.addAction(action)
-
-    def _choose_device(self, kind: str, device: str | None) -> None:
-        self._choice[kind] = device
-        self.outbox.put(
-            {
-                "v": PROTOCOL_VERSION,
-                "type": "control",
-                "action": "capture.device",
-                "kind": kind,
-                "device": device,
-            }
-        )
-
-    def _on_tray_activated(self, reason) -> None:
-        if reason == QSystemTrayIcon.Trigger:
-            if self.win is not None:
-                visible = not self.win.isVisible()
-                self.win.setVisible(visible)
-                if self.handle is not None:
-                    self.handle.setVisible(visible)
-                    if visible:
-                        self.handle.follow()
+    def show_window(self) -> None:
+        if self.win is None:
+            return
+        self.win.setVisible(True)
+        if self.handle is not None:
+            self.handle.setVisible(True)
+            self.handle.follow()
 
     def _sync_handle(self) -> None:
         if self.handle is not None and self.win is not None and self.win.isVisible():
             self.handle.follow()
 
-    def _set_font(self, size: int) -> None:
-        self.font_size = size
-        if self.win is not None:
-            self.win.apply_style(font_size=size)
-        self._sync_handle()
-        self._persist()
+    def _apply_control(self, msg: dict) -> None:
+        if msg.get("target") != "render" or msg.get("action") != "render.style":
+            return
+        self._set_style(msg.get("style") or {})
 
-    def _set_width(self, ratio: float) -> None:
-        self.width_ratio = ratio
+    def _set_style(self, style: dict) -> None:
+        if "font_size" in style:
+            self.font_size = int(style["font_size"])
+        if "width_ratio" in style:
+            self.width_ratio = float(style["width_ratio"])
+        if "show_source" in style:
+            self.show_source = bool(style["show_source"])
+        if "history_lines" in style:
+            self.history_lines = max(0, min(2, int(style["history_lines"])))
+        if "handle_size" in style:
+            self.handle_size = int(style["handle_size"])
+            if self.handle is not None:
+                self.handle.set_size(self.handle_size)
         if self.win is not None:
-            self.win.apply_style(width_ratio=ratio)
+            self.win.apply_style(
+                font_size=self.font_size,
+                width_ratio=self.width_ratio,
+                show_source=self.show_source,
+                history_lines=self.history_lines,
+            )
         self._sync_handle()
-        self._persist()
-
-    def _set_source(self, enabled: bool) -> None:
-        self.show_source = enabled
-        if self.win is not None:
-            self.win.apply_style(show_source=enabled)
-        self._sync_handle()
-        self._persist()
-
-    def _set_history_lines(self, count: int) -> None:
-        self.history_lines = max(0, min(2, count))
-        if self.win is not None:
-            self.win.apply_style(history_lines=self.history_lines)
-        self._sync_handle()
-        self._persist()
-
-    def _set_handle_size(self, size: int) -> None:
-        self.handle_size = size
-        if self.handle is not None:
-            self.handle.set_size(size)
         self._persist()
 
     def _persist(self) -> None:
         if self.win is not None:
             self.anchor_x, self.bottom_margin = self.win.position_state()
             self.win.set_anchor(self.anchor_x, self.bottom_margin)
-        save_settings(
+        save_render(
             {
                 "font_size": self.font_size,
                 "width_ratio": self.width_ratio,
@@ -333,7 +170,7 @@ class RendererApp:
             self.queue.put((STATUS, connected))
 
         try:
-            asyncio.run(mirror(self.ws, on_msg, on_status=on_status, outbox=self.outbox))
+            asyncio.run(mirror(self.ws, on_msg, on_status=on_status))
         except Exception:
             pass
 
@@ -347,6 +184,9 @@ class RendererApp:
                 break
             if isinstance(item, tuple) and item and item[0] == STATUS:
                 self.win.set_connected(bool(item[1]))
+                continue
+            if item.get("type") == "control":
+                self._apply_control(item)
                 continue
             caption = self.store.apply(item)
             if caption is not None:
@@ -379,8 +219,6 @@ class RendererApp:
         elif step == 2:
             caption["translation"] = translated
             caption["state"] = "final"
-        elif step == 0:
-            caption["translation"] = ""
         self._demo_step += 1
         self.win.set_caption(caption)
         self._sync_handle()
@@ -391,7 +229,9 @@ def main() -> int:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
-    stored = load_settings()
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-5s %(name)s: %(message)s")
+
+    stored = load_render()
     render_config = load_render_config()
     theme.apply(render_config.get("theme", {}))
     window_defaults = render_config.get("window", {})
@@ -412,26 +252,24 @@ def main() -> int:
     parser.add_argument("--demo", action="store_true")
     args = parser.parse_args()
 
-    font_size = args.font_size or int(pick("font_size", 34))
-    width_ratio = args.width_ratio or float(pick("width_ratio", 0.74))
-    show_source = bool(pick("show_source", True)) and not args.no_source
-    bottom_margin = args.bottom_margin or int(pick("bottom_margin", 92))
-    anchor_x = float(pick("anchor_x", 0.5))
-    handle_size = int(pick("handle_size", 14))
-    history_lines = int(pick("history_lines", 1))
-
-    app = RendererApp(
+    app = QApplication.instance() or QApplication(sys.argv)
+    renderer = RendererApp(
         ws=args.ws,
-        font_size=font_size,
-        width_ratio=width_ratio,
-        show_source=show_source,
+        font_size=args.font_size or int(pick("font_size", 34)),
+        width_ratio=args.width_ratio or float(pick("width_ratio", 0.74)),
+        show_source=bool(pick("show_source", True)) and not args.no_source,
         demo=args.demo,
-        bottom_margin=bottom_margin,
-        anchor_x=anchor_x,
-        handle_size=handle_size,
-        history_lines=history_lines,
+        bottom_margin=args.bottom_margin or int(pick("bottom_margin", 92)),
+        anchor_x=float(pick("anchor_x", 0.5)),
+        handle_size=int(pick("handle_size", 14)),
+        history_lines=int(pick("history_lines", 1)),
     )
-    return app.run()
+
+    guard = acquire(INSTANCE, lambda message: renderer.show_window())
+    if guard is None:
+        return 0
+    renderer.guard = guard
+    return renderer.run(app)
 
 
 if __name__ == "__main__":

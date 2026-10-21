@@ -61,6 +61,8 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _apply_control(captures: dict[str, LiveCapture], msg: dict) -> None:
+    if (msg.get("target") or "pipeline") != "pipeline":
+        return
     if msg.get("action") != "capture.device":
         return
     kind = str(msg.get("kind") or "loopback")

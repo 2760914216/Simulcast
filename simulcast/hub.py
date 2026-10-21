@@ -50,13 +50,14 @@ class Hub:
             self._clients.discard(ws)
 
     def _control(self, raw: Any) -> None:
-        if self.on_control is None:
-            return
         try:
             msg = decode(raw if isinstance(raw, str) else raw.decode("utf-8"))
         except Exception:
             return
         if msg.get("type") != "control":
+            return
+        self.publish(msg)
+        if self.on_control is None:
             return
         try:
             self.on_control(msg)

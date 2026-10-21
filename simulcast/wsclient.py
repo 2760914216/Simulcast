@@ -4,7 +4,7 @@ import asyncio
 import json
 import logging
 import queue
-from typing import Any, Callable
+from typing import Callable
 
 from websockets.asyncio.client import connect
 
