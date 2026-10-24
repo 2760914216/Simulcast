@@ -28,7 +28,7 @@ language = ""
 
 [asr.providers.qwen3-local]
 type = "openai-chat"
-base_url = "http://127.0.0.1:8091"
+base_url = "http://127.0.0.1:18091"
 model = "qwen3-asr"
 max_tokens = 512
 timeout_s = 30.0
@@ -42,7 +42,7 @@ enabled = true
 
 [mt.providers.qwen3-local]
 type = "openai-chat"
-base_url = "http://127.0.0.1:8092"
+base_url = "http://127.0.0.1:18092"
 model = "qwen3.5-9b"
 max_tokens = 256
 draft_max_tokens = 96

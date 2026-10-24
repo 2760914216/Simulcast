@@ -62,10 +62,10 @@ uv pip install --python .venv/Scripts/python.exe -r requirements.txt
 ```bash
 llama-server -m Qwen3-ASR-1.7B-Q8_0.gguf \
              -mm Qwen3-ASR-1.7B-mmproj-f16.gguf \
-             --host 127.0.0.1 --port 8091 -ngl 99 -c 4096 --jinja
+             --host 127.0.0.1 --port 18091 -ngl 99 -c 4096 --jinja
 
 llama-server -m Qwen3.5-9B-Q4_K_M.gguf \
-             --host 127.0.0.1 --port 8092 -ngl 99 -c 4096 --jinja -fa on
+             --host 127.0.0.1 --port 18092 -ngl 99 -c 4096 --jinja -fa on
 ```
 
 ### 3. 运行
@@ -107,7 +107,7 @@ provider = "qwen3-local"
 
 [asr.providers.qwen3-local]
 type = "openai-chat"          # 目前只实现这一种
-base_url = "http://127.0.0.1:8091"
+base_url = "http://127.0.0.1:18091"
 model = "qwen3-asr"
 max_tokens = 512
 timeout_s = 30
