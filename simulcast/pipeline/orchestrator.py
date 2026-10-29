@@ -111,6 +111,7 @@ class Segment:
     end_reason: str = ""
     prefix_text: str = ""
     prefix_checked: bool = False
+    emit_t0: float | None = None
 
 
 class Orchestrator:
@@ -160,7 +161,7 @@ class Orchestrator:
         cap = Caption(
             id=seg.id,
             source=seg.source,
-            t0=round(seg.t0, 3),
+            t0=round(seg.emit_t0 if seg.emit_t0 is not None else seg.t0, 3),
             t1=round(seg.t1, 3) if seg.t1 is not None else None,
             raw=seg.raw,
             translation=seg.translation,
@@ -375,6 +376,7 @@ class Orchestrator:
         if tail and tail != seg.raw:
             seg.raw = tail
             seg.state = "draft"
+            seg.emit_t0 = max(seg.t0, seg.last_child_end)
             await self._emit(seg)
             if self._mt_ok:
                 self._enqueue_mt(seg, final=False)

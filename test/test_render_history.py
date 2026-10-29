@@ -14,19 +14,24 @@ def cap(cid, raw, translation, state="final"):
     return {"type": "caption", "id": cid, "t0": 0, "raw": raw, "translation": translation, "state": state, "seq": 1}
 
 
+def feed(item):
+    win.note_history(item)
+    win.set_caption(item)
+
+
 # a parent draft and its committed child carry the same sentence: one row only
-win.set_caption(cap("parent", "Many of us never seem to get promoted.", "我们中许多人似乎永远都得不到晋升。"))
-win.set_caption(cap("child", "Many of us never seem to get promoted.", "我们中许多人似乎永远都得不到晋升。"))
+feed(cap("parent", "Many of us never seem to get promoted.", "我们中许多人似乎永远都得不到晋升。"))
+feed(cap("child", "Many of us never seem to get promoted.", "我们中许多人似乎永远都得不到晋升。"))
 visible = [v.text for v in win.history_views if v.isVisible()]
 print("parent->child rows:", visible, "history:", win._history)
 assert visible == [], visible
 assert len(win._history) == 1 and win._history[0]["id"] == "parent"
 
-win.set_caption(cap("a", "Why is that?", "那是为什么呢？"))
+feed(cap("a", "Why is that?", "那是为什么呢？"))
 assert win.history_id == "child", win.history_id
-win.set_caption(cap("b", "What can we do about it?", "我们又该怎么做呢？"))
+feed(cap("b", "What can we do about it?", "我们又该怎么做呢？"))
 assert win.history_id == "a", win.history_id
-win.set_caption(cap("c", "First sentence here.", "这里是第三句。"))
+feed(cap("c", "First sentence here.", "这里是第三句。"))
 assert win.history_id == "b"
 assert [h["id"] for h in win._history] == ["a", "b"], win._history
 print("one history line:", win.history_id, "history:", [h["id"] for h in win._history], "size", win.size())

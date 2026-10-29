@@ -191,6 +191,7 @@ class RendererApp:
             caption = self.store.apply(item)
             if caption is not None:
                 if item.get("type") == "caption":
+                    self.win.note_history(item)
                     history_id = self.win.history_id
                     if history_id and item.get("id") == history_id and item.get("id") != caption.get("id"):
                         self.win.update_history(item)

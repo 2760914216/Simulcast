@@ -75,8 +75,8 @@ def test_missing_base_url():
 def test_repo_configs():
     cfg = load()
     assert cfg.profile == "local"
-    assert cfg.asr.active.base_url.endswith(":8091")
-    assert cfg.mt.active.base_url.endswith(":8092")
+    assert cfg.asr.active.base_url.endswith(":18091")
+    assert cfg.mt.active.base_url.endswith(":18092")
 
     cloud = load(profile="cloud-mt")
     assert cloud.mt.active.model == "deepseek-chat"

@@ -50,6 +50,7 @@ class SubtitleWindow(QWidget):
         self._bottom_margin = bottom_margin
         self._history_lines = max(0, min(2, history_lines))
         self._history: list[dict] = []
+        self._last_final: dict | None = None
         self._source_line = False
 
         self._throttle = QTimer(self)
@@ -140,6 +141,7 @@ class SubtitleWindow(QWidget):
         self._rendered_text = ""
         self._rendered_id = None
         self._history = []
+        self._last_final = None
         self._source_line = False
         self.source_label.hide()
         self.text_view.set_font(self._font(max(16, int(self._font_size * 0.55))))
@@ -209,6 +211,15 @@ class SubtitleWindow(QWidget):
         self._history.append({"id": cap.get("id"), "translation": text})
         self._history = self._history[-2:]
 
+    def note_history(self, cap: dict) -> None:
+        """Track finished captions only: a live one is still becoming the current line."""
+        if cap.get("state") != "final":
+            return
+        previous = self._last_final
+        if previous is not None and previous.get("id") != cap.get("id"):
+            self._promote(previous)
+        self._last_final = cap
+
     @property
     def history_id(self) -> str | None:
         return self._history[-1]["id"] if self._history else None
@@ -227,8 +238,6 @@ class SubtitleWindow(QWidget):
             self._relayout()
 
     def _render(self, cap: dict) -> None:
-        if self._displayed is not None and cap.get("id") != self._displayed.get("id"):
-            self._promote(self._displayed)
         self._caption = cap
         self._displayed = cap
         raw = (cap.get("raw") or "").strip()
@@ -297,7 +306,11 @@ class SubtitleWindow(QWidget):
             self.source_label.setFixedHeight(self.source_label.fontMetrics().height())
 
         current_text = " ".join(((self._displayed or {}).get("translation") or "").split())
-        candidates = [h for h in self._history if not self._same(h["translation"], current_text)]
+        current_id = (self._displayed or {}).get("id")
+        finals = list(self._history) + ([self._last_final] if self._last_final else [])
+        candidates = [
+            h for h in finals if h.get("id") != current_id and not self._same(h["translation"], current_text)
+        ]
         show_n = min(self._history_lines, len(candidates))
         max_height = int(area.height() * 0.85)
         while True:
