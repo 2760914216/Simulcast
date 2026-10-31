@@ -183,7 +183,23 @@ class Orchestrator:
         if seg.asr_busy:
             seg.asr_pending = kind
             return
+        seg.asr_busy = True
         self._spawn(self._asr_run(seg, kind))
+
+    def _evict_finished(self, live: dict[str, Segment]) -> None:
+        """Forget finished segments only; anything still owed a decode must stay.
+
+        A segment that has not ended yet, or whose decode is queued/running, still
+        receives events under its id. Dropping it would let the next event build a
+        second Segment for the same id while the old one is still being written to.
+        """
+        if len(live) <= 128:
+            return
+        for key, seg in list(live.items()):
+            if len(live) <= 64:
+                break
+            if seg.t1 is not None and not seg.asr_busy and seg.asr_pending is None:
+                live.pop(key, None)
 
     def _looks_like_noise(self, seg: Segment, text: str, lang: str | None) -> bool:
         if not self.cfg.segment.semantic_heuristics or not text or not lang:
@@ -494,9 +510,7 @@ class Orchestrator:
                     seg.t1 = ev.t1
                     seg.end_reason = ev.reason
                     self._kick_asr(seg, "final")
-                    if len(live) > 128:
-                        for key in list(live)[:64]:
-                            live.pop(key, None)
+                    self._evict_finished(live)
         for ev in segmenter.flush(last_t):
             seg = live.get(ev.seg_id)
             if seg is None:
