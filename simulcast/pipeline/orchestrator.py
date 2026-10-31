@@ -197,28 +197,29 @@ class Orchestrator:
 
     async def _asr_run(self, seg: Segment, kind: str) -> None:
         seg.asr_busy = True
-        result = None
         try:
-            if seg.audio.size == 0:
-                raise ValueError("empty segment")
-            rms = float(np.sqrt(np.mean(np.square(seg.audio, dtype=np.float64))))
-            if rms < self.cfg.segment.vad_floor:
-                raise ValueError(f"segment too quiet (rms={rms:.5f})")
-            result = await self.asr.transcribe(seg.audio)
-        except Exception as exc:
-            log.warning("asr failed for %s: %s", seg.id, exc)
-        finally:
-            seg.asr_busy = False
-        if result is not None and self._looks_like_noise(seg, result.text.strip(), result.language):
             result = None
-        if result is not None:
-            text = result.text.strip()
-            seg.asr_ms = result.latency_ms
-            seg.lang = result.language or seg.lang
-            if text:
-                await self._ingest_text(seg, text, final=(kind == "final"))
-        nxt = seg.asr_pending
-        seg.asr_pending = None
+            try:
+                if seg.audio.size == 0:
+                    raise ValueError("empty segment")
+                rms = float(np.sqrt(np.mean(np.square(seg.audio, dtype=np.float64))))
+                if rms < self.cfg.segment.vad_floor:
+                    raise ValueError(f"segment too quiet (rms={rms:.5f})")
+                result = await self.asr.transcribe(seg.audio)
+            except Exception as exc:
+                log.warning("asr failed for %s: %s", seg.id, exc)
+            if result is not None and self._looks_like_noise(seg, result.text.strip(), result.language):
+                result = None
+            if result is not None:
+                text = result.text.strip()
+                seg.asr_ms = result.latency_ms
+                seg.lang = result.language or seg.lang
+                if text:
+                    await self._ingest_text(seg, text, final=(kind == "final"))
+        finally:
+            nxt = seg.asr_pending
+            seg.asr_pending = None
+            seg.asr_busy = False
         if nxt:
             self._kick_asr(seg, nxt)
 
