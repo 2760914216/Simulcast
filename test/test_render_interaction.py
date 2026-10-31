@@ -20,6 +20,14 @@ handle.show()
 handle.follow()
 
 
+def assert_handle_attached(why):
+    """follow() places the handle outside the right edge, or inside it when the screen is too narrow."""
+    right = win.x() + win.width()
+    outside, inside = right + 6, right - handle.width() - 14
+    got = handle.x()
+    assert min(abs(got - outside), abs(got - inside)) <= 2, (why, got, outside, inside)
+
+
 def press(x, y):
     handle.mousePressEvent(
         QMouseEvent(QEvent.MouseButtonPress, QPointF(7, 7), QPointF(x, y), Qt.LeftButton, Qt.LeftButton, Qt.NoModifier)
@@ -62,7 +70,7 @@ assert win.y() + win.height() == start_bottom + 60
 release(280, 260)
 assert released
 print("after drag:", win.pos(), "handle:", handle.pos())
-assert abs(handle.x() - (win.geometry().right() + 6)) <= 2, (handle.x(), win.geometry().right())
+assert_handle_attached("after drag")
 
 from simulcast.render.qt import RendererApp
 
@@ -75,7 +83,7 @@ win.set_caption(caption("after", "Another sentence.", "另一句。"))
 anchor2, bottom2 = win.position_state()
 print("anchor after persist+relayout:", round(anchor2, 3), bottom2)
 assert abs(anchor2 - anchor) < 0.01 and abs(bottom2 - bottom) <= 2
-assert abs(handle.x() - (win.geometry().right() + 6)) <= 2, "handle must follow a relayout"
+assert_handle_attached("after relayout")
 
 win.set_caption(caption("a", "Hello everyone.", "大家好。"))
 assert win.text_view.text == "大家好。"
