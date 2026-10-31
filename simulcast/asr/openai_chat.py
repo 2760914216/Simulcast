@@ -71,6 +71,10 @@ class OpenAiAsr:
                 }
             ],
         }
+        for key, neutral in (("repeat_penalty", 1.0), ("presence_penalty", 0.0), ("frequency_penalty", 0.0)):
+            value = getattr(self.provider, key)
+            if value != neutral:
+                payload[key] = value
         started = time.monotonic()
         try:
             response = await self._client.post(self.base_url + "/v1/chat/completions", json=payload)

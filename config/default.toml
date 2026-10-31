@@ -25,13 +25,18 @@ semantic_heuristics = false
 [asr]
 provider = "qwen3-local"
 language = ""
+# 解码退化成复读/幻觉时兜底：尾部截断或整段丢弃，不送 MT
+guard = true
+guard_diversity = 0.30
+guard_max_chars_per_s = 30.0
 
 [asr.providers.qwen3-local]
 type = "openai-chat"
 base_url = "http://127.0.0.1:18091"
 model = "qwen3-asr"
-max_tokens = 512
+max_tokens = 256
 timeout_s = 30.0
+repeat_penalty = 1.1
 
 [mt]
 provider = "qwen3-local"

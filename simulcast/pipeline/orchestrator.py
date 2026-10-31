@@ -10,6 +10,7 @@ from typing import AsyncIterator
 
 import numpy as np
 
+from ..asr.guard import judge
 from ..audio.segmenter import Segmenter
 from ..audio.vad import EnergyVad
 from ..config import AppCfg
@@ -226,6 +227,16 @@ class Orchestrator:
                 log.warning("asr failed for %s: %s", seg.id, exc)
             if result is not None and self._looks_like_noise(seg, result.text.strip(), result.language):
                 result = None
+            if result is not None:
+                verdict = judge(
+                    result.text,
+                    lang=result.language,
+                    seconds=seg.audio.size / float(self.cfg.audio.target_rate),
+                    cfg=self.cfg.asr,
+                )
+                if verdict.reason:
+                    log.warning("asr %s %s, raw=%r", seg.id, verdict.reason, result.text[:80])
+                result.text = verdict.text
             if result is not None:
                 text = result.text.strip()
                 seg.asr_ms = result.latency_ms

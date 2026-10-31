@@ -45,6 +45,9 @@ class AsrProvider:
     max_tokens: int = 512
     timeout_s: float = 30.0
     temperature: float = 0.0
+    repeat_penalty: float = 1.0
+    presence_penalty: float = 0.0
+    frequency_penalty: float = 0.0
 
 
 @dataclass
@@ -64,6 +67,9 @@ class MtProvider:
 class AsrCfg:
     provider: str = ""
     language: str | None = None
+    guard: bool = True
+    guard_diversity: float = 0.30
+    guard_max_chars_per_s: float = 30.0
     providers: dict[str, AsrProvider] = field(default_factory=dict)
     active: AsrProvider | None = None
 
@@ -137,8 +143,10 @@ def _from_dict(data: dict[str, Any], profile: str) -> AppCfg:
     _apply(cfg.hub, data.get("hub", {}))
 
     asr_data = data.get("asr", {})
+    _apply(cfg.asr, asr_data)
     cfg.asr.provider = asr_data.get("provider", "")
     cfg.asr.language = asr_data.get("language") or None
+    cfg.asr.providers = {}
     for name, item in asr_data.get("providers", {}).items():
         cfg.asr.providers[name] = _build(AsrProvider, item)
     cfg.asr.active = cfg.asr.providers.get(cfg.asr.provider)
