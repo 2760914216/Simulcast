@@ -2,11 +2,13 @@ __pycache__/
 *.pyc
 .venv/
 .idea/
+.ignore/
 logs/
 runs/
 test/*.wav
 
 # 本机专用，不进仓库
+vad_lab/
 scripts/serve-local.*
 config/local.toml
 AGENTS.md
