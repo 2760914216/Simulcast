@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import tomllib
 from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
@@ -29,11 +30,16 @@ class SegmentCfg:
     draft_interval_ms: int = 900
     vad_floor: float = 3e-4
     vad_ratio: float = 3.0
+    # Legacy fields accepted for existing config files; assembler ignores them.
     carry_ttl_s: float = 20.0
     carry_min_chars: int = 12
     carry_max_chars: int = 200
     carry_max_words: int = 8
     semantic_heuristics: bool = False
+    window_overlap_s: float = 1.5
+    utterance_max_s: float = 30.0
+    utterance_max_chars: int = 1000
+    audio_buffer_s: float = 30.0
 
 
 @dataclass
@@ -70,6 +76,9 @@ class AsrCfg:
     guard: bool = True
     guard_diversity: float = 0.30
     guard_max_chars_per_s: float = 30.0
+    speech_evidence_mode: str = "off"
+    speech_evidence_model: str = ""
+    repair_max_s: float = 10.0
     providers: dict[str, AsrProvider] = field(default_factory=dict)
     active: AsrProvider | None = None
 
@@ -134,7 +143,33 @@ def load(path: str | Path | None = None, profile: str | None = None) -> AppCfg:
     data = _load_toml(base)
     name = profile or data.get("app", {}).get("profile") or "local"
     _merge(data, _load_toml(base.parent / "profiles" / f"{name}.toml"))
-    return _from_dict(data, name)
+    cfg = _from_dict(data, name)
+    if cfg.asr.speech_evidence_model:
+        model_path = Path(cfg.asr.speech_evidence_model).expanduser()
+        if not model_path.is_absolute():
+            model_path = base.parent / model_path
+        cfg.asr.speech_evidence_model = str(model_path.resolve())
+    return cfg
+
+
+def _validate_windows(cfg: AppCfg) -> None:
+    for name in ("max_segment_s", "window_overlap_s", "utterance_max_s", "audio_buffer_s"):
+        try:
+            value = float(getattr(cfg.segment, name))
+        except (ValueError, TypeError) as exc:
+            raise ConfigError(f"segment.{name} must be a finite number") from exc
+        if not math.isfinite(value) or value < 0 or (name != "window_overlap_s" and value == 0):
+            raise ConfigError(f"segment.{name} has an invalid duration")
+        setattr(cfg.segment, name, value)
+    if cfg.audio.frame_ms <= 0 or cfg.audio.target_rate <= 0:
+        raise ConfigError("audio.frame_ms and target_rate must be positive")
+    if cfg.segment.window_overlap_s + cfg.audio.frame_ms / 1000 > cfg.segment.max_segment_s:
+        raise ConfigError("segment.window_overlap_s must leave room for a new audio frame")
+    if cfg.segment.audio_buffer_s < cfg.segment.max_segment_s:
+        raise ConfigError("segment.audio_buffer_s must cover at least one full ASR window")
+    count = cfg.segment.utterance_max_chars
+    if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+        raise ConfigError("segment.utterance_max_chars must be a positive integer")
 
 
 def _from_dict(data: dict[str, Any], profile: str) -> AppCfg:
@@ -142,9 +177,20 @@ def _from_dict(data: dict[str, Any], profile: str) -> AppCfg:
     _apply(cfg.audio, data.get("audio", {}))
     _apply(cfg.segment, data.get("segment", {}))
     _apply(cfg.hub, data.get("hub", {}))
+    _validate_windows(cfg)
 
     asr_data = data.get("asr", {})
     _apply(cfg.asr, asr_data)
+    if cfg.asr.speech_evidence_mode not in ("off", "observe"):
+        raise ConfigError("asr.speech_evidence_mode must be off or observe")
+    if cfg.asr.speech_evidence_mode == "observe" and not cfg.asr.speech_evidence_model:
+        raise ConfigError("asr.speech_evidence_model is required for observe mode")
+    try:
+        cfg.asr.repair_max_s = float(cfg.asr.repair_max_s)
+    except (ValueError, TypeError) as exc:
+        raise ConfigError("asr.repair_max_s must be a finite positive duration") from exc
+    if not math.isfinite(cfg.asr.repair_max_s) or cfg.asr.repair_max_s <= 0:
+        raise ConfigError("asr.repair_max_s must be a finite positive duration")
     cfg.asr.provider = asr_data.get("provider", "")
     cfg.asr.language = asr_data.get("language") or None
     cfg.asr.providers = {}

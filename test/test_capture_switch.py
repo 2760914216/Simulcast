@@ -1,5 +1,7 @@
 import simulcast.audio.capture as capture
 from simulcast.cli import _apply_control
+import numpy as np
+from unittest.mock import patch as mock_patch
 
 
 class FakeMic:
@@ -71,7 +73,48 @@ def check_control():
     print("control dispatch         ok")
 
 
+def check_reopen_timeline():
+    """A new recorder/rate must not make ordered ASR windows go backwards."""
+    cap = capture.LiveCapture(target_rate=16000)
+    times = []
+
+    class Recorder:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def record(self, numframes):
+            return np.full(numframes, .1, dtype=np.float32)
+
+    class Mic:
+        def recorder(self, **kwargs):
+            return Recorder()
+
+    class IdentityResampler:
+        def __init__(self, *args):
+            pass
+
+        def process(self, pcm):
+            return pcm
+
+    def consume(t, pcm):
+        times.append(t)
+        cap._stop.set()
+
+    with mock_patch.object(capture, "_get", return_value=Mic()), \
+         mock_patch.object(capture, "CANDIDATE_RATES", (16000,)), \
+         mock_patch.object(capture, "StreamResampler", IdentityResampler):
+        cap._loop("a", "a", consume)
+        cap._stop.clear()
+        cap._loop("b", "b", consume)
+    assert np.allclose(times, [.02, .04]), times
+    print("reopen timeline          ok")
+
+
 check_follow()
 check_manual()
 check_missing()
 check_control()
+check_reopen_timeline()

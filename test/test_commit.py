@@ -24,7 +24,8 @@ async def run_case(decodes, final_text):
     for text in decodes:
         await orch._ingest_text(seg, text, final=False)
     await orch._ingest_text(seg, final_text, final=True)
-    kids = [m for m in sink.msgs if m["type"] == "caption" and m["id"].startswith("b-1-s")]
+    latest = {m["id"]: m for m in sink.msgs if m["type"] == "caption"}
+    kids = [m for m in latest.values() if m["state"] == "final"]
     ev = [m for m in sink.msgs if m["type"] == "eval"][-1]
     return kids, ev
 

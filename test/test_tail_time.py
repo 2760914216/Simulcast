@@ -23,13 +23,13 @@ async def main():
     seg = Segment(id="b-1", source="file", t0=0.0, t_end=12.0)
 
     await orch._ingest_text(seg, "First sentence here. Second half still going", final=False)
-    first = [m for m in sink.msgs if m["id"] == "b-1"][-1]
+    first = [m for m in sink.msgs if m["type"] == "caption"][-1]
     print("first draft:", first["t0"], first["raw"])
     assert first["t0"] == 0.0, first["t0"]
 
     await orch._ingest_text(seg, "First sentence here. Second half still going", final=False)
-    kid = [m for m in sink.msgs if m["id"].startswith("b-1-s")][-1]
-    tail = [m for m in sink.msgs if m["id"] == "b-1"][-1]
+    kid = [m for m in sink.msgs if m["type"] == "caption" and m["state"] == "final"][-1]
+    tail = [m for m in sink.msgs if m["type"] == "caption" and m["state"] == "draft"][-1]
     print("child:", kid["id"], kid["t0"], kid["t1"], "tail:", tail["t0"], tail["raw"])
     assert tail["raw"].startswith("Second half"), tail["raw"]
     assert tail["t0"] >= kid["t1"] - 1e-6, (tail["t0"], kid["t1"])

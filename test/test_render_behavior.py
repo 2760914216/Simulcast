@@ -53,4 +53,6 @@ QTest.qWait(260)
 assert len(renders) == base + 1
 print("two-tone sample:", win.text_view.stable_len, "/", len(win.text_view.text))
 win.grab().save("runs/render_twotone.png")
+win.set_caption(cap("b", "", "final", raw="We should stay."))
+assert win.text_view.text == "We should stay.", "final raw fallback must clear the obsolete translation"
 print("OK")

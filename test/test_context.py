@@ -52,7 +52,10 @@ def make(block_first=False, fail_first=False):
 
 
 async def commit(orch, parent, text):
-    await orch._emit_child(parent, text, 0.0, 1.0)
+    n = len(orch._history)
+    window = Segment(id=f"w{n}", source=parent.source, t0=float(n),
+                     t_end=float(n + 1), t1=float(n + 1), end_reason="silence")
+    await orch._ingest_text(window, text, final=True)
 
 
 async def drain(orch):
@@ -142,7 +145,8 @@ async def scenario_sequence():
 async def scenario_multi_sentence():
     orch, mt, parent = make()
     await orch.start()
-    await orch._commit_plain(parent, "Alpha beta. Gamma delta. Epsilon zeta.", 0, 42)
+    parent.end_reason = "silence"
+    await orch._ingest_text(parent, "Alpha beta. Gamma delta. Epsilon zeta.", final=True)
     await drain(orch)
     await orch.stop()
     return mt.calls

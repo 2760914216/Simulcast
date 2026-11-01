@@ -50,6 +50,14 @@ def test_revision_keeps_translation():
     assert current["translation"] == "大家好，今天我们将", current
 
 
+def test_final_empty_translation_clears_previous_version():
+    store = CaptionStore()
+    store.apply(cap("a", 1, 1, raw="We should go.", translation="我们应该走。"))
+    store.apply(cap("a", 1, 2, raw="We should stay.", translation=""))
+    current = store.apply(cap("a", 1, 3, raw="We should stay.", translation="", state="final"))
+    assert current["translation"] == "", current
+
+
 def test_session_switch_resets():
     store = CaptionStore()
     store.apply(cap("a", 1, 1, sid="one"))

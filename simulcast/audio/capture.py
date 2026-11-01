@@ -47,6 +47,7 @@ class LiveCapture:
         self._stop = threading.Event()
         self._wake = threading.Event()
         self._level = 0.0
+        self._captured_samples = 0
         self.last_error: str | None = None
 
     @property
@@ -87,6 +88,7 @@ class LiveCapture:
         if self._thread is not None:
             return
         self._stop.clear()
+        self._captured_samples = 0
         self._thread = threading.Thread(target=self._run, args=(on_frame,), name="capture", daemon=True)
         self._thread.start()
 
@@ -138,7 +140,6 @@ class LiveCapture:
             try:
                 with mic.recorder(samplerate=rate, blocksize=block) as rec:
                     log.info("capturing from %r at %s Hz", name, rate)
-                    t = 0.0
                     deadline = time.monotonic() + self.poll_s
                     while not self._stop.is_set():
                         if self._wake.is_set() or time.monotonic() >= deadline:
@@ -154,8 +155,8 @@ class LiveCapture:
                         if out.size == 0:
                             continue
                         self._level = float(np.sqrt(np.mean(np.square(out, dtype=np.float64))))
-                        t += out.size / self.target_rate
-                        on_frame(t, out)
+                        self._captured_samples += out.size
+                        on_frame(self._captured_samples / self.target_rate, out)
                 return True
             except _Switched:
                 raise

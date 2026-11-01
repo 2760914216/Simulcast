@@ -98,6 +98,8 @@ async def _cmd_run(args) -> int:
 
     sink = MultiSink(*sinks)
     sid = new_session_id()
+    orch = None
+    tasks = []
     try:
         try:
             asr = build_asr(cfg.asr)
@@ -159,12 +161,24 @@ async def _cmd_run(args) -> int:
         await orch.stop()
         await sink.emit(session_msg("stopped", sid))
         return 0
+    except ConfigError as exc:
+        log.error("%s", exc)
+        await sink.emit(session_msg("error", sid, detail=str(exc)))
+        return 2
     except KeyboardInterrupt:
         return 130
     finally:
-        await sink.close()
-        if hub is not None:
-            await hub.stop()
+        try:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            if orch is not None:
+                await orch.stop()
+        finally:
+            await sink.close()
+            if hub is not None:
+                await hub.stop()
 
 
 async def _cmd_serve(args) -> int:

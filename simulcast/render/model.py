@@ -36,7 +36,7 @@ class CaptionStore:
         if previous is not None:
             new_translation = (msg.get("translation") or "").strip()
             old_translation = (previous.get("translation") or "").strip()
-            if not new_translation and old_translation:
+            if not new_translation and old_translation and msg.get("state") != "final":
                 msg = {**msg, "translation": previous["translation"]}
         self.captions[cid] = msg
 

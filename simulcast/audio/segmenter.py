@@ -16,6 +16,7 @@ class SegEvent:
     t1: float
     audio: np.ndarray
     reason: str = ""
+    overlap_s: float = 0.0
 
 
 class Segmenter:
@@ -42,6 +43,7 @@ class Segmenter:
         self._last_tick = 0.0
         self._count = 0
         self._seg_id: str | None = None
+        self._overlap_s = 0.0
 
     def _concat(self) -> np.ndarray:
         if not self._frames:
@@ -55,6 +57,7 @@ class Segmenter:
         self._silence_ms = 0.0
         self._total_ms = 0.0
         self._seg_id = None
+        self._overlap_s = 0.0
 
     def _dur_ms(self, frame: np.ndarray) -> float:
         return frame.size * 1000.0 / self.sample_rate
@@ -62,8 +65,8 @@ class Segmenter:
     def _quietest_cut(self) -> tuple[int, float]:
         """Pick the flattest point in the tail, and measure how long that gap lasts.
 
-        A gap of >=120 ms means a real pause (safe sentence boundary); a shorter
-        one is just an inter-word gap, so the sentence is still being spoken.
+        The 120 ms distinction is diagnostic only. Neither kind of hard window
+        boundary proves that the logical sentence has finished.
         """
         n = len(self._frames)
         window = max(2, int(600 / self.frame_ms))
@@ -83,7 +86,12 @@ class Segmenter:
     def flush(self, t: float) -> list[SegEvent]:
         if not self._frames or self._seg_id is None:
             return []
-        ev = SegEvent("end", self._seg_id, self._seg_start, t, self._concat(), reason="flush")
+        if self._overlap_s and self._total_ms <= self._overlap_s * 1000 + 1e-6:
+            # A hard cut can coincide with EOF. This window contains only
+            # already-decoded samples; finish closes the previous pending text.
+            self._reset()
+            return []
+        ev = SegEvent("end", self._seg_id, self._seg_start, t, self._concat(), reason="flush", overlap_s=self._overlap_s)
         self._reset()
         return [ev]
 
@@ -99,7 +107,7 @@ class Segmenter:
             self._frames = [f for _, f in self._pre]
             self._count += 1
             self._seg_id = f"{self.source}-{self._count:04d}"
-            self._seg_start = end_t - self._dur_ms(self._frames[0]) * (len(self._frames) - 1) / 1000.0
+            self._seg_start = max(0.0, end_t - sum(self._dur_ms(f) for f in self._frames) / 1000.0)
             self._speech_ms = dur
             self._silence_ms = 0.0
             self._total_ms = sum(self._dur_ms(f) for f in self._frames)
@@ -119,38 +127,36 @@ class Segmenter:
         endpoint = self._silence_ms >= self.cfg.silence_ms and self._speech_ms >= self.cfg.min_speech_ms
         hard_cut = not endpoint and self._total_ms >= self.cfg.max_segment_s * 1000.0
         if endpoint:
-            events.append(SegEvent("end", seg_id, self._seg_start, end_t, self._concat(), reason="silence"))
+            events.append(SegEvent("end", seg_id, self._seg_start, end_t, self._concat(), reason="silence", overlap_s=self._overlap_s))
             self._reset(list(zip([end_t] * len(self._frames[-self._pre_len :]), self._frames[-self._pre_len :])))
             return events
         if hard_cut:
-            cut, gap_ms = self._quietest_cut()
+            _, gap_ms = self._quietest_cut()
             reason = "hard_pause" if gap_ms >= 120 else "hard"
-            if 0 < cut < len(self._frames):
-                cut_t = end_t - (len(self._frames) - cut) * self.frame_ms / 1000.0
-                events.append(
-                    SegEvent("end", seg_id, self._seg_start, cut_t, np.concatenate(self._frames[:cut]), reason=reason)
-                )
-                carry = self._frames[cut:]
+            events.append(SegEvent("end", seg_id, self._seg_start, end_t, self._concat(), reason=reason, overlap_s=self._overlap_s))
+            keep = min(len(self._frames) - 1, max(0, int(round(self.cfg.window_overlap_s * 1000 / self.frame_ms))))
+            if keep:
+                carry = self._frames[-keep:]
                 self._count += 1
                 self._seg_id = f"{self.source}-{self._count:04d}"
                 self._frames = carry
-                self._seg_start = cut_t
                 self._total_ms = sum(self._dur_ms(f) for f in carry)
+                self._overlap_s = self._total_ms / 1000.0
+                self._seg_start = end_t - self._overlap_s
                 self._speech_ms = self._total_ms
                 self._silence_ms = 0.0
                 self._last_tick = end_t
-                events.append(SegEvent("start", self._seg_id, cut_t, end_t, self._concat()))
+                events.append(SegEvent("start", self._seg_id, self._seg_start, end_t, self._concat(), overlap_s=self._overlap_s))
                 return events
-            events.append(SegEvent("end", seg_id, self._seg_start, end_t, self._concat(), reason="hard"))
-            self._reset(list(zip([end_t] * len(self._frames[-self._pre_len :]), self._frames[-self._pre_len :])))
+            self._reset()
             return events
 
         if self._speech_ms < self.cfg.min_speech_ms and self._silence_ms >= self.cfg.silence_ms:
-            events.append(SegEvent("end", seg_id, self._seg_start, end_t, self._concat(), reason="short"))
+            events.append(SegEvent("end", seg_id, self._seg_start, end_t, self._concat(), reason="short", overlap_s=self._overlap_s))
             self._reset(list(self._pre))
             return events
 
         if (end_t - self._last_tick) * 1000.0 >= self.cfg.draft_interval_ms and self._speech_ms >= self.cfg.min_speech_ms:
             self._last_tick = end_t
-            events.append(SegEvent("tick", seg_id, self._seg_start, end_t, self._concat()))
+            events.append(SegEvent("tick", seg_id, self._seg_start, end_t, self._concat(), overlap_s=self._overlap_s))
         return events

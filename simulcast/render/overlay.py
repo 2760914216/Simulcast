@@ -154,7 +154,7 @@ class SubtitleWindow(QWidget):
         translated = (cap.get("translation") or "").strip()
         final = cap.get("state") == "final"
 
-        if not translated and self._displayed is not None:
+        if not translated and self._displayed is not None and not final:
             if not self._grace.isActive():
                 self._grace.start()
             return

@@ -11,15 +11,16 @@ speed = 1.0
 silence_ms = 450
 min_speech_ms = 300
 max_segment_s = 10.0
+window_overlap_s = 1.5
+utterance_max_s = 30.0
+utterance_max_chars = 1000
+audio_buffer_s = 30.0
 preroll_ms = 200
 draft_interval_ms = 900
 vad_floor = 0.0003
 vad_ratio = 3.0
-carry_ttl_s = 20.0
-carry_min_chars = 12
-carry_max_chars = 200
-carry_max_words = 8
-# false: 忠于 ASR 输出，只做机械处理（标点切句、长度上限、去重）
+# 旧 carry_* 配置仍兼容读取，但不再参与句子提交；预算使用 utterance_max_*。
+# 可选旧语言切换短片段过滤；默认关闭。
 semantic_heuristics = false
 
 [asr]
@@ -29,6 +30,11 @@ language = ""
 guard = true
 guard_diversity = 0.30
 guard_max_chars_per_s = 30.0
+# 可选的本地 Silero 观测；不以低分拦截字幕，模型路径相对当前配置文件目录。
+speech_evidence_mode = "off"
+speech_evidence_model = ""
+# 本机 Qwen3-ASR 已验证 30 s 请求；仅用于对齐歧义的限次补解码，常规窗口仍为 10 s。
+repair_max_s = 30.0
 
 [asr.providers.qwen3-local]
 type = "openai-chat"

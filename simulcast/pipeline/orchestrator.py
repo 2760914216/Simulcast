@@ -1,89 +1,31 @@
 from __future__ import annotations
 
 import asyncio
-import difflib
 import logging
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import AsyncIterator
 
 import numpy as np
 
 from ..asr.guard import judge
+from ..asr.verification import observation
+from ..audio.buffer import AudioBuffer
 from ..audio.segmenter import Segmenter
 from ..audio.vad import EnergyVad
-from ..config import AppCfg
+from ..config import AppCfg, ConfigError
 from ..mt.sanitize import clean
 from ..protocol import Caption, new_session_id
 from ..sink import Sink
-from .sentences import is_terminated, split_sentences
+from .sentences import split_sentences
+from .utterances import UtteranceAssembler, UtteranceUpdate, WindowDecode
 
 log = logging.getLogger(__name__)
 
 
-def _merge_carry(prefix: str, text: str) -> str:
-    """Join a carried fragment with the next decode, dropping repeated words.
-
-    The cut point can leave the same word in both halves ("Welcome" + "Welcome
-    to the meeting"), so compare word tails/heads before concatenating.
-    """
-    pw = prefix.split()
-    nw = text.split()
-    norm = lambda w: w.strip(" .,;:!?，；：！？\"'").lower()  # noqa: E731
-    keep = 0
-    for n in range(min(len(pw), len(nw)), 0, -1):
-        if [norm(w) for w in pw[-n:]] == [norm(w) for w in nw[:n]]:
-            keep = n
-            break
-    rest = " ".join(nw[keep:]).strip()
-    return f"{prefix} {rest}".strip() if rest else prefix
-
-
-_TRAILING_CONNECTORS = {
-    "if", "and", "but", "or", "so", "because", "that", "which", "who", "whom", "whose",
-    "when", "while", "although", "though", "than", "then", "as", "to", "of", "for", "with",
-    "without", "in", "on", "at", "by", "from", "into", "about", "the", "a", "an", "my",
-    "your", "our", "their", "his", "her", "its", "this", "these", "those", "is", "are",
-    "was", "were", "be", "been", "being", "will", "would", "can", "could", "should", "may",
-    "might", "must", "not", "have", "has", "had", "do", "does", "did",
-}
-
-
-def _ends_open(text: str) -> bool:
-    """True when the tail ends on a word that cannot end a sentence ("...look bad if")."""
-    tokens = (text or "").split()
-    if not tokens:
-        return False
-    last = tokens[-1].strip(" .,;:!?。，；：！？\"'").lower()
-    return last in _TRAILING_CONNECTORS
-
-
 def _norm_words(text: str) -> str:
     return " ".join(re.sub(r"[^\w\s']", " ", (text or "").lower()).split())
-
-
-def _covered_offset(early: str, final: str) -> int:
-    """How far into `final` does the already-shown prefix reach?
-
-    Walk the matching blocks in order and stop at the first real divergence, so a
-    coincidental short match near the end cannot make us skip unshown text.
-    """
-    if not early:
-        return 0
-    a, b = early.lower(), final.lower()
-    matcher = difflib.SequenceMatcher(None, a, b, autojunk=False)
-    pos_a = pos_b = 0
-    for block in matcher.get_matching_blocks():
-        if block.size == 0:
-            break
-        if block.a - pos_a > 4 or block.b - pos_b > 4:
-            break
-        pos_a = block.a + block.size
-        pos_b = block.b + block.size
-    if pos_a < len(a) - 4:
-        return pos_b
-    return pos_b
 
 
 def _history_window(texts: list[str], limit_sentences: int, limit_chars: int) -> list[str]:
@@ -116,6 +58,7 @@ class Segment:
     audio: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.float32))
     raw: str = ""
     translation: str = ""
+    translation_raw: str = ""
     state: str = "draft"
     lang: str | None = None
     asr_ms: int | None = None
@@ -123,30 +66,32 @@ class Segment:
     asr_busy: bool = False
     asr_pending: str | None = None
     mt_rev: int = 0
-    full_text: str = ""
-    committed: int = 0
-    prev_sents: list[str] = field(default_factory=list)
     committed_texts: list[str] = field(default_factory=list)
     t_end: float = 0.0
-    next_sentence_no: int = 0
-    last_child_end: float = 0.0
     end_reason: str = ""
-    prefix_text: str = ""
-    prefix_checked: bool = False
-    emit_t0: float | None = None
     commit_pos: int | None = None
     history: tuple[str, ...] = ()
+    overlap_s: float = 0.0
+
+
+@dataclass(frozen=True)
+class _MtJob:
+    seg: Segment
+    revision: int
+    final: bool
+    text: str
+    history: tuple[str, ...]
 
 
 class Orchestrator:
-    """Audio burst -> ASR -> sentence commits -> per-sentence translation.
+    """Ordered audio windows -> revisable logical sentences -> translation.
 
-    One burst can yield several captions: every punctuated sentence is promoted to
-    its own final caption once it is stable across two decodes, while the as-yet
-    unfinished sentence stays on the draft caption of the burst.
+    Window caps bound ASR work. A separate per-source assembler owns sentence
+    identity and keeps the last candidate revisable across forced boundaries.
     """
 
-    def __init__(self, cfg: AppCfg, asr, mt, sink: Sink, sid: str | None = None):
+    def __init__(self, cfg: AppCfg, asr, mt, sink: Sink, sid: str | None = None,
+                 *, speech_evidence=None):
         self.cfg = cfg
         self.asr = asr
         self.mt = mt
@@ -162,17 +107,65 @@ class Orchestrator:
         self._mt_ok = mt is not None and cfg.mt.enabled
         self._last_emit: dict[str, tuple] = {}
         self._children: dict[str, Segment] = {}
-        self._carry: dict[str, tuple[Segment, str, float, float]] = {}
         self._lang: dict[str, str] = {}
+        self._utterances = UtteranceAssembler(cfg.segment.utterance_max_s, cfg.segment.utterance_max_chars)
+        self._audio: dict[str, AudioBuffer] = {}
+        self._asr_locks: dict[str, asyncio.Lock] = {}
+        self._speech_evidence = speech_evidence
+        if cfg.asr.speech_evidence_mode == "observe" and speech_evidence is None:
+            from ..audio.speech_evidence import SileroEvidence
+
+            try:
+                self._speech_evidence = SileroEvidence(cfg.asr.speech_evidence_model)
+            except (ValueError, OSError) as exc:
+                raise ConfigError(str(exc)) from exc
 
     async def start(self) -> None:
+        if self._speech_evidence is not None:
+            try:
+                await asyncio.to_thread(self._speech_evidence.measure, np.zeros(512, dtype=np.float32), self.cfg.audio.target_rate)
+            except Exception as exc:
+                raise ConfigError(f"cannot initialize speech evidence: {exc}") from exc
         self._workers.append(asyncio.create_task(self._mt_loop(), name="mt-worker"))
 
-    async def stop(self) -> None:
+    async def stop(self, *, reason: str = "stop_unconfirmed") -> None:
+        tasks = list(self._tasks)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         for w in self._workers:
             w.cancel()
         await asyncio.gather(*self._workers, return_exceptions=True)
         self._workers.clear()
+        await self._retire_pending(reason=reason)
+        for seg in list(self._children.values()):
+            if seg.commit_pos is not None and seg.state != "final":
+                await self._translation_incomplete(seg)
+        # Cancelled workers account for the active job in their finally block;
+        # account for queued jobs too, so join/repeated stop remain well defined.
+        while not self._mt_q.empty():
+            self._mt_q.get_nowait()
+            self._mt_q.task_done()
+
+    async def _retire_pending(self, source: str | None = None, *, reason: str,
+                              outcome: str = "") -> None:
+        for update in self._utterances.flush(source, final=False, reason=reason):
+            await self._apply_utterance(update, outcome=outcome)
+
+    async def _boundary(self, seg: Segment, reason: str, outcome: str = "") -> None:
+        await self.sink.emit({"v": 1, "type": "utterance_boundary", "sid": self.sid,
+                              "id": seg.id, "source": seg.source, "t0": seg.t0,
+                              "t1": seg.t_end, "reason": reason, "outcome": outcome})
+
+    async def _translation_incomplete(self, seg: Segment) -> None:
+        # Source confirmation is independent of translation service availability.
+        seg.mt_rev += 1
+        if seg.translation_raw != seg.raw:
+            seg.translation = ""
+            seg.translation_raw = ""
+        seg.state = "final"
+        await self._emit(seg)
+        await self._boundary(seg, "translation_incomplete")
 
     async def _emit(self, seg: Segment) -> None:
         fingerprint = (seg.raw, seg.translation, seg.state, seg.t1)
@@ -186,7 +179,7 @@ class Orchestrator:
         cap = Caption(
             id=seg.id,
             source=seg.source,
-            t0=round(seg.emit_t0 if seg.emit_t0 is not None else seg.t0, 3),
+            t0=round(seg.t0, 3),
             t1=round(seg.t1, 3) if seg.t1 is not None else None,
             raw=seg.raw,
             translation=seg.translation,
@@ -206,7 +199,8 @@ class Orchestrator:
 
     def _kick_asr(self, seg: Segment, kind: str) -> None:
         if seg.asr_busy:
-            seg.asr_pending = kind
+            if seg.asr_pending != "final":
+                seg.asr_pending = kind
             return
         seg.asr_busy = True
         self._spawn(self._asr_run(seg, kind))
@@ -239,83 +233,65 @@ class Orchestrator:
     async def _asr_run(self, seg: Segment, kind: str) -> None:
         seg.asr_busy = True
         try:
-            result = None
-            try:
-                if seg.audio.size == 0:
-                    raise ValueError("empty segment")
-                rms = float(np.sqrt(np.mean(np.square(seg.audio, dtype=np.float64))))
-                if rms < self.cfg.segment.vad_floor:
-                    raise ValueError(f"segment too quiet (rms={rms:.5f})")
-                result = await self.asr.transcribe(seg.audio)
-            except Exception as exc:
-                log.warning("asr failed for %s: %s", seg.id, exc)
-            if result is not None and self._looks_like_noise(seg, result.text.strip(), result.language):
-                result = None
-            if result is not None:
-                verdict = judge(
-                    result.text,
-                    lang=result.language,
-                    seconds=seg.audio.size / float(self.cfg.audio.target_rate),
-                    cfg=self.cfg.asr,
-                )
-                if verdict.reason:
-                    log.warning("asr %s %s, raw=%r", seg.id, verdict.reason, result.text[:80])
-                result.text = verdict.text
-            if result is not None:
-                text = result.text.strip()
-                seg.asr_ms = result.latency_ms
-                seg.lang = result.language or seg.lang
-                if text:
-                    await self._ingest_text(seg, text, final=(kind == "final"))
+            lock = self._asr_locks.setdefault(seg.source, asyncio.Lock())
+            async with lock:
+                while True:
+                    # Audio and times must describe the request actually sent,
+                    # even if capture replaces seg.audio while HTTP is in flight.
+                    request = replace(seg, t1=seg.t1 if kind == "final" else None)
+                    await self._decode_window(request, kind)
+                    nxt = seg.asr_pending
+                    seg.asr_pending = None
+                    if not nxt:
+                        break
+                    kind = nxt
         finally:
-            nxt = seg.asr_pending
             seg.asr_pending = None
             seg.asr_busy = False
-        if nxt:
-            self._kick_asr(seg, nxt)
 
-    def _commit_index(self, sents: list[str], stable: int) -> int:
-        n = 0
-        for i in range(stable):
-            if is_terminated(sents[i]):
-                n = i + 1
-        return n
-
-    def _sentence_span(self, seg: Segment, sents: list[str], index: int) -> tuple[float, float]:
-        total = sum(len(s) for s in sents) or 1
-        start = sum(len(s) for s in sents[:index])
-        end = start + len(sents[index])
-        span = max(0.2, (seg.t_end or seg.t1 or seg.t0) - seg.t0)
-        return seg.t0 + span * start / total, seg.t0 + span * end / total
-
-    async def _emit_child(self, parent: Segment, text: str, t0: float, t1: float) -> None:
-        key = _norm_words(text)
-        if len(key) > 8 and any(key in _norm_words(prev) for prev in parent.committed_texts):
+    async def _decode_window(self, seg: Segment, kind: str) -> None:
+        result = None
+        try:
+            if seg.audio.size == 0:
+                raise ValueError("empty segment")
+            rms = float(np.sqrt(np.mean(np.square(seg.audio, dtype=np.float64))))
+            if rms < self.cfg.segment.vad_floor:
+                raise ValueError(f"segment too quiet (rms={rms:.5f})")
+            result = await self.asr.transcribe(seg.audio)
+        except Exception as exc:
+            log.warning("asr failed for %s: %s", seg.id, exc)
+        if result is None:
+            if kind == "final":
+                await self._retire_pending(seg.source, reason="asr_unconfirmed", outcome="failed")
             return
-        t0 = max(t0, parent.last_child_end)
-        t1 = max(t1, t0 + 0.2)
-        parent.last_child_end = t1
-        parent.next_sentence_no += 1
-        child = Segment(
-            id=f"{parent.id}-s{parent.next_sentence_no}",
-            source=parent.source,
-            t0=t0,
-            t1=t1,
-            raw=text,
-            state="draft" if self._mt_ok else "final",
-            lang=parent.lang,
-            asr_ms=parent.asr_ms,
-            t_end=t1,
-        )
-        parent.committed_texts.append(text)
-        self._children[child.id] = child
-        if len(self._children) > 600:
-            for key in list(self._children)[:300]:
-                self._children.pop(key, None)
-        self._record(child, text)
-        await self._emit(child)
-        if self._mt_ok:
-            self._enqueue_mt(child, final=True)
+        original = result.text
+        verdict = judge(original, lang=result.language,
+                        seconds=seg.audio.size / float(self.cfg.audio.target_rate), cfg=self.cfg.asr)
+        if verdict.reason:
+            log.warning("asr %s %s, raw=%r", seg.id, verdict.reason, original[:80])
+        if self._speech_evidence is not None:
+            try:
+                evidence = await asyncio.to_thread(self._speech_evidence.measure, seg.audio, self.cfg.audio.target_rate)
+                record = observation(source=seg.source, window_id=seg.id, t0=seg.t0,
+                                     t1=seg.t_end, text=original, evidence=evidence,
+                                     guard_reason=verdict.reason)
+                record.update(sid=self.sid, decode_kind=kind)
+                await self.sink.emit(record)
+            except Exception:
+                # Optional diagnostics cannot suppress a real caption.
+                log.exception("speech evidence failed for %s", seg.id)
+        if self._looks_like_noise(seg, verdict.text, result.language):
+            if kind == "final":
+                await self._retire_pending(seg.source, reason="asr_unconfirmed", outcome="rejected")
+            return
+        seg.asr_ms = result.latency_ms
+        seg.lang = result.language or seg.lang
+        if not verdict.text:
+            if kind == "final":
+                await self._retire_pending(seg.source, reason="asr_unconfirmed",
+                                           outcome="rejected" if verdict.reason else "empty")
+        else:
+            await self._ingest_text(seg, verdict.text, final=(kind == "final"))
 
     def _record(self, child: Segment, text: str) -> None:
         """Original text enters the history when it is committed, not when it translates."""
@@ -334,122 +310,81 @@ class Orchestrator:
             _history_window(texts, self.cfg.mt.context_sentences, self.cfg.mt.context_max_chars)
         )
 
-    async def _commit_sentence(self, parent: Segment, sents: list[str], index: int) -> None:
-        text = sents[index].strip()
-        if not text:
-            return
-        t0, t1 = self._sentence_span(parent, sents, index)
-        await self._emit_child(parent, text, t0, t1)
-
-    async def _commit_plain(self, parent: Segment, text: str, start_char: int, total_chars: int) -> None:
-        if not text.strip():
-            return
-        total = max(1, total_chars)
-        span = max(0.2, (parent.t_end or parent.t1 or parent.t0) - parent.t0)
-        cursor = start_char + (len(text) - len(text.lstrip()))
-        for part in split_sentences(text):
-            sentence = part.strip()
-            if len(sentence.strip(" .,;:!?。，；：！？\"'")) < 2:
-                cursor += len(part) + 1
-                continue
-            t0 = parent.t0 + span * cursor / total
-            t1 = parent.t0 + span * (cursor + len(sentence)) / total
-            await self._emit_child(parent, sentence, t0, t1)
-            cursor += len(sentence) + 1
-
-    async def _commit_remainder(self, parent: Segment, final_text: str) -> None:
-        """Emit only what the full decode says beyond what was already shown."""
-        early = " ".join(parent.committed_texts).strip()
-        offset = _covered_offset(early, final_text)
-        await self._commit_plain(parent, final_text[offset:], offset, len(final_text))
-
-    async def _attach_carry(self, seg: Segment) -> None:
-        if seg.prefix_checked:
-            return
-        seg.prefix_checked = True
-        item = self._carry.get(seg.source)
-        if item is None:
-            return
-        parent, carry_text, carry_t0, ts = item
-        if parent.t_end > seg.t0 + 0.15:
-            return  # the carry belongs to a burst that was still running; leave it
-        self._carry.pop(seg.source, None)
-        if time.monotonic() - ts > self.cfg.segment.carry_ttl_s:
-            await self._flush_carry(parent, carry_text, carry_t0)
-            return
-        seg.prefix_text = carry_text
-        seg.t0 = min(seg.t0, carry_t0)
-        log.info("carry attached to %s: %r", seg.id, carry_text[:70])
-
-    def _split_hard_cut(self, text: str) -> tuple[str, str]:
-        """Mid-speech cut: the trailing sentence is probably unfinished, so hold it.
-
-        ASR always punctuates a truncated segment as if it were complete, so the
-        trailing period tells us nothing; the audio-side gap length did, and only
-        bursts flagged "hard" (short gap) get here.
-        """
-        sents = split_sentences(text)
-        if not sents:
-            return text, ""
-        tail = sents[-1].strip(" .,;:，；：!?！？")
-        if len(tail) < self.cfg.segment.carry_min_chars or len(tail) > self.cfg.segment.carry_max_chars:
-            return text, ""
-        if len(tail.split()) > self.cfg.segment.carry_max_words:
-            if not (self.cfg.segment.semantic_heuristics and _ends_open(tail)):
-                return text, ""
-        if len(sents) == 1:
-            return "", tail
-        return " ".join(sents[:-1]).strip(), tail
-
-    def _stash_carry(self, seg: Segment, tail: str, start_char: int, total_chars: int) -> None:
-        total = max(1, total_chars)
-        span = max(0.2, (seg.t_end or seg.t1 or seg.t0) - seg.t0)
-        t0 = seg.t0 + span * max(0, start_char) / total
-        self._carry[seg.source] = (seg, tail, t0, time.monotonic())
-        log.info("hard cut: carrying %r into the next burst", tail[:70])
-
-    async def _flush_carry(self, parent: Segment, text: str, t0: float) -> None:
-        span = max(0.4, len(text) / 12.0)
-        await self._emit_child(parent, text, t0, t0 + span)
-
     async def _ingest_text(self, seg: Segment, text: str, final: bool) -> None:
-        await self._attach_carry(seg)
-        if seg.prefix_text:
-            text = _merge_carry(seg.prefix_text, text)
-        sents = split_sentences(text)
-        if not sents:
-            return
-        seg.full_text = text
-        stable = 0
-        while stable < min(len(sents), len(seg.prev_sents)) and sents[stable] == seg.prev_sents[stable]:
-            stable += 1
-        seg.prev_sents = sents
         if final:
-            await self._emit_eval(seg, list(seg.committed_texts), sents)
-            early = " ".join(seg.committed_texts).strip()
-            offset = _covered_offset(early, text)
-            rest = text[offset:]
-            if seg.end_reason == "hard":
-                body, tail = self._split_hard_cut(rest)
-            else:
-                body, tail = rest, ""
-            if body.strip():
-                await self._commit_plain(seg, body, offset, len(text))
-            if tail:
-                self._stash_carry(seg, tail, offset + len(body), len(text))
-            return
-        target = min(self._commit_index(sents, stable), len(sents) - 1)
-        while seg.committed < target:
-            await self._commit_sentence(seg, sents, seg.committed)
-            seg.committed += 1
-        tail = " ".join(sents[seg.committed :]).strip()
-        if tail and tail != seg.raw:
-            seg.raw = tail
-            seg.state = "draft"
-            seg.emit_t0 = max(seg.t0, seg.last_child_end)
-            await self._emit(seg)
-            if self._mt_ok:
-                self._enqueue_mt(seg, final=False)
+            await self._emit_eval(seg, list(seg.committed_texts), split_sentences(text))
+        decode = WindowDecode(seg.id, seg.source, seg.t0, seg.t_end or seg.t1 or seg.t0,
+                              text, final, seg.end_reason, seg.overlap_s)
+        natural_end = final and seg.end_reason not in ("hard", "hard_pause")
+        # At a natural end, inspect a tentative merge before committing it so
+        # an ambiguous overlap still has a chance to use its cached audio.
+        preview = replace(decode, final=False) if natural_end and seg.overlap_s else decode
+        updates = self._utterances.ingest(preview)
+        uncertain = any(u.reason == "alignment_uncertain" for u in updates)
+        repaired = await self._repair_pending(seg, final=natural_end) if uncertain and final else []
+        if repaired:
+            updates = [u for u in updates if u.final] + repaired
+        elif preview is not decode:
+            updates += self._utterances.ingest(decode)
+        for update in updates:
+            if update.final:
+                seg.committed_texts.append(update.text)
+            await self._apply_utterance(update, seg)
+
+    async def _repair_pending(self, window: Segment, *, final: bool) -> list[UtteranceUpdate]:
+        bounds = self._utterances.pending_audio_bounds(window.source)
+        buffer = self._audio.get(window.source)
+        if bounds is None or buffer is None or self.asr is None:
+            return []
+        t0, t1 = bounds
+        if t1 - t0 > self.cfg.asr.repair_max_s + 1e-6:
+            return []
+        pcm = buffer.slice(t0, t1)
+        if pcm is None:
+            return []
+        try:
+            # One attempt per new window. The model input cap was validated
+            # separately; normal decode windows remain bounded by max_segment_s.
+            result = await self.asr.transcribe(pcm)
+            verdict = judge(result.text, lang=result.language,
+                            seconds=pcm.size / self.cfg.audio.target_rate, cfg=self.cfg.asr)
+            await self.sink.emit({"v": 1, "type": "asr_repair", "sid": self.sid,
+                                  "id": window.id, "source": window.source, "t0": t0, "t1": t1,
+                                  "raw": result.text, "guard_reason": verdict.reason})
+            if verdict.text:
+                return self._utterances.repair(window.source, verdict.text, t0, t1, final=final)
+        except Exception:
+            log.exception("boundary repair failed for %s", window.id)
+        return []
+
+    async def _apply_utterance(self, update: UtteranceUpdate, window: Segment | None = None,
+                               *, outcome: str = "") -> None:
+        seg = self._children.get(update.id)
+        if seg is None:
+            seg = Segment(update.id, update.source, update.t0)
+            self._children[update.id] = seg
+        changed = seg.raw != update.text
+        retired = update.reason.endswith("_unconfirmed")
+        if changed or retired:
+            seg.mt_rev += 1
+        seg.raw, seg.t0, seg.t_end = update.text, update.t0, update.t1
+        seg.t1 = update.t1 if update.final else None
+        seg.state = "final" if update.final and not self._mt_ok else "draft"
+        if window is not None:
+            seg.lang, seg.asr_ms = window.lang, window.asr_ms
+        if update.final and seg.commit_pos is None:
+            self._record(seg, update.text)
+        await self._emit(seg)
+        if self._mt_ok and not retired and (changed or update.final):
+            self._enqueue_mt(seg, final=update.final)
+        if retired or "alignment" in update.reason or update.reason.startswith("budget_"):
+            await self._boundary(seg, update.reason, outcome)
+        if retired:
+            self._children.pop(seg.id, None)
+        if len(self._children) > 600:
+            for key in list(self._children)[:300]:
+                if self._children[key].commit_pos is not None:
+                    self._children.pop(key, None)
 
     async def _emit_eval(self, seg: Segment, early: list[str], final_sents: list[str]) -> None:
         """Compare what the online rule committed against the final full decode.
@@ -475,7 +410,7 @@ class Orchestrator:
                 "id": seg.id,
                 "source": seg.source,
                 "reason": seg.end_reason,
-                "prefix": seg.prefix_text,
+                "prefix": "",
                 "t0": round(seg.t0, 3),
                 "t1": round(seg.t1, 3) if seg.t1 is not None else None,
                 "early_sents": early,
@@ -495,43 +430,56 @@ class Orchestrator:
         seg.mt_rev += 1
         seg.history = self._history_snapshot(seg.commit_pos)
         self._mt_seq += 1
-        self._mt_q.put_nowait((0 if final else 1, self._mt_seq, seg, seg.mt_rev, final))
+        job = _MtJob(seg, seg.mt_rev, final, seg.raw, seg.history)
+        self._mt_q.put_nowait((0 if final else 1, self._mt_seq, job))
 
     async def _mt_loop(self) -> None:
         while True:
-            prio, seq, seg, rev, final = await self._mt_q.get()
+            prio, seq, job = await self._mt_q.get()
+            seg, rev, final = job.seg, job.revision, job.final
             try:
                 if rev != seg.mt_rev:
                     continue
-                await self._translate(seg, rev, final)
+                await self._translate(seg, rev, final, job.text, job.history)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 log.warning("mt failed for %s: %s", seg.id, exc)
+                if final and rev == seg.mt_rev:
+                    await self._translation_incomplete(seg)
             finally:
                 self._mt_q.task_done()
 
-    async def _translate(self, seg: Segment, rev: int, final: bool) -> None:
+    async def _translate(self, seg: Segment, rev: int, final: bool,
+                         text: str, history: tuple[str, ...]) -> None:
         started = time.monotonic()
         buf = ""
         last_emit = 0.0
         interval = self.cfg.mt.emit_interval_ms / 1000.0
-        async for delta in self.mt.stream(seg.raw, list(seg.history), draft=not final):
+        async for delta in self.mt.stream(text, list(history), draft=not final):
             if rev != seg.mt_rev:
                 return
             buf += delta
             candidate = clean(buf, partial=True)
-            if candidate and (not seg.translation or len(candidate) >= 0.8 * len(seg.translation)):
+            if candidate and (seg.translation_raw != text or not seg.translation
+                              or len(candidate) >= 0.8 * len(seg.translation)):
                 seg.translation = candidate
+                seg.translation_raw = text
             now = time.monotonic()
             if not final and now - last_emit >= interval:
                 last_emit = now
                 await self._emit(seg)
+        if rev != seg.mt_rev:
+            return
         polished = clean(buf)
         if polished:
             seg.translation = polished
+            seg.translation_raw = text
         seg.mt_ms = int((time.monotonic() - started) * 1000)
         if final:
+            if not polished:
+                await self._translation_incomplete(seg)
+                return
             seg.state = "final"
         await self._emit(seg)
 
@@ -544,14 +492,16 @@ class Orchestrator:
             sample_rate=self.cfg.audio.target_rate,
         )
         live: dict[str, Segment] = {}
+        audio = self._audio.setdefault(source, AudioBuffer(self.cfg.audio.target_rate, self.cfg.segment.audio_buffer_s))
         last_t = 0.0
         async for t, frame in frames:
             last_t = t
+            audio.append(t, frame)
             speech = vad.is_speech(frame)
             for ev in segmenter.push(frame, t, speech):
                 seg = live.get(ev.seg_id)
                 if seg is None:
-                    seg = Segment(id=ev.seg_id, source=source, t0=ev.t0)
+                    seg = Segment(id=ev.seg_id, source=source, t0=ev.t0, overlap_s=ev.overlap_s)
                     live[ev.seg_id] = seg
                 seg.audio = ev.audio
                 seg.t_end = ev.t1
@@ -562,6 +512,11 @@ class Orchestrator:
                     seg.end_reason = ev.reason
                     self._kick_asr(seg, "final")
                     self._evict_finished(live)
+                    # Apply backpressure rather than retaining an unbounded
+                    # queue of final windows when decoding cannot keep up.
+                    if len(self._tasks) >= 8:
+                        log.warning("ASR backlog reached 8 windows; waiting for a decode")
+                        await asyncio.wait(list(self._tasks), return_when=asyncio.FIRST_COMPLETED)
         for ev in segmenter.flush(last_t):
             seg = live.get(ev.seg_id)
             if seg is None:
@@ -575,16 +530,16 @@ class Orchestrator:
             log.info("stream finished at %.2fs", last_t)
 
     async def finish(self, timeout: float = 30.0) -> None:
-        for source, (parent, text, t0, ts) in list(self._carry.items()):
-            self._carry.pop(source, None)
-            await self._flush_carry(parent, text, t0)
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            running = [t for t in self._tasks if not t.done()]
-            if running:
-                await asyncio.gather(*running, return_exceptions=True)
-            if self._mt_q.empty() and not [t for t in self._tasks if not t.done()]:
-                await asyncio.sleep(0.2)
-                if self._mt_q.empty() and not [t for t in self._tasks if not t.done()]:
-                    break
-            await asyncio.sleep(0.05)
+        async def drain() -> None:
+            while self._tasks:
+                await asyncio.gather(*list(self._tasks), return_exceptions=True)
+            for update in self._utterances.flush():
+                await self._apply_utterance(update)
+            # Empty does not mean finished: a worker may already own the last job.
+            await self._mt_q.join()
+
+        try:
+            await asyncio.wait_for(drain(), timeout)
+        except asyncio.TimeoutError:
+            log.warning("pipeline finish exceeded %.1fs; closing unfinished work without ASR confirmation", timeout)
+            await self.stop(reason="finish_unconfirmed")

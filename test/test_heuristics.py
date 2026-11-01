@@ -1,20 +1,6 @@
 from simulcast.config import AppCfg
-from simulcast.pipeline.orchestrator import Orchestrator, Segment, _ends_open
+from simulcast.pipeline.orchestrator import Orchestrator, Segment
 from simulcast.sink import NullSink
-
-cases = {
-    "So, setting expectations too high can make us look bad if": True,
-    "We don't maintain them": False,
-    "and these efforts": False,
-    "Today we will": True,
-    "The budget for next quarter looks tight": False,
-    "...and the budget for": True,
-    "...and the budget for.": True,
-}
-for text, expected in cases.items():
-    got = _ends_open(text)
-    print(("ok  " if got == expected else "FAIL"), repr(text), got)
-    assert got == expected
 
 cfg = AppCfg()
 cfg.mt.enabled = False
