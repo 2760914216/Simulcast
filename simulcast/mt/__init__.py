@@ -10,5 +10,5 @@ def build_mt(cfg: MtCfg):
     if provider.type == "openai-chat":
         from .openai_chat import OpenAiMt
 
-        return OpenAiMt(provider, cfg.target_lang, cfg.context_sentences)
+        return OpenAiMt(provider, cfg.target_lang)
     raise ConfigError(f"unsupported mt provider type: {provider.type}")

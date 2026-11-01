@@ -42,7 +42,9 @@ repeat_penalty = 1.05
 [mt]
 provider = "qwen3-local"
 target_lang = "简体中文"
+# 历史只给已提交的 ASR 原文，不给历史译文；两项任一为 0 即关闭历史
 context_sentences = 2
+context_max_chars = 2000
 emit_interval_ms = 180
 enabled = true
 

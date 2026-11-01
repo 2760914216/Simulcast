@@ -86,6 +86,27 @@ def _covered_offset(early: str, final: str) -> int:
     return pos_b
 
 
+def _history_window(texts: list[str], limit_sentences: int, limit_chars: int) -> list[str]:
+    """Pick the recent originals that fit both budgets, oldest first.
+
+    An original that alone exceeds the character budget ends the window: it is not
+    truncated and not skipped in favour of an older one.
+    """
+    if limit_sentences <= 0 or limit_chars <= 0 or not texts:
+        return []
+    recent = texts[-limit_sentences:]
+    if len(recent[-1]) > limit_chars:
+        return []
+    picked: list[str] = []
+    total = 0
+    for text in reversed(recent):
+        if total + len(text) > limit_chars:
+            break
+        picked.append(text)
+        total += len(text)
+    return picked[::-1]
+
+
 @dataclass
 class Segment:
     id: str
@@ -113,6 +134,8 @@ class Segment:
     prefix_text: str = ""
     prefix_checked: bool = False
     emit_t0: float | None = None
+    commit_pos: int | None = None
+    history: tuple[str, ...] = ()
 
 
 class Orchestrator:
@@ -130,7 +153,8 @@ class Orchestrator:
         self.sink = sink
         self.sid = sid or new_session_id()
         self._seq = 0
-        self._context: list[tuple[str, str]] = []
+        self._history: list[tuple[int, str]] = []
+        self._commit_pos = 0
         self._mt_q: asyncio.PriorityQueue = asyncio.PriorityQueue()
         self._mt_seq = 0
         self._tasks: set[asyncio.Task] = set()
@@ -288,9 +312,27 @@ class Orchestrator:
         if len(self._children) > 600:
             for key in list(self._children)[:300]:
                 self._children.pop(key, None)
+        self._record(child, text)
         await self._emit(child)
         if self._mt_ok:
             self._enqueue_mt(child, final=True)
+
+    def _record(self, child: Segment, text: str) -> None:
+        """Original text enters the history when it is committed, not when it translates."""
+        self._commit_pos += 1
+        child.commit_pos = self._commit_pos
+        body = text.strip()
+        if body and (not self._history or self._history[-1][1] != body):
+            self._history.append((child.commit_pos, body))
+            if len(self._history) > 64:
+                del self._history[:32]
+
+    def _history_snapshot(self, pos: int | None) -> tuple[str, ...]:
+        """Frozen view of the originals before pos (everything when pos is unknown)."""
+        texts = [text for p, text in self._history if pos is None or p < pos]
+        return tuple(
+            _history_window(texts, self.cfg.mt.context_sentences, self.cfg.mt.context_max_chars)
+        )
 
     async def _commit_sentence(self, parent: Segment, sents: list[str], index: int) -> None:
         text = sents[index].strip()
@@ -451,6 +493,7 @@ class Orchestrator:
 
     def _enqueue_mt(self, seg: Segment, final: bool) -> None:
         seg.mt_rev += 1
+        seg.history = self._history_snapshot(seg.commit_pos)
         self._mt_seq += 1
         self._mt_q.put_nowait((0 if final else 1, self._mt_seq, seg, seg.mt_rev, final))
 
@@ -473,7 +516,7 @@ class Orchestrator:
         buf = ""
         last_emit = 0.0
         interval = self.cfg.mt.emit_interval_ms / 1000.0
-        async for delta in self.mt.stream(seg.raw, list(self._context), draft=not final):
+        async for delta in self.mt.stream(seg.raw, list(seg.history), draft=not final):
             if rev != seg.mt_rev:
                 return
             buf += delta
@@ -490,9 +533,6 @@ class Orchestrator:
         seg.mt_ms = int((time.monotonic() - started) * 1000)
         if final:
             seg.state = "final"
-            if seg.raw and seg.translation:
-                self._context.append((seg.raw, seg.translation))
-                self._context = self._context[-8:]
         await self._emit(seg)
 
     async def run(self, frames: AsyncIterator[tuple[float, np.ndarray]], source: str = "loopback") -> None:

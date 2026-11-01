@@ -7,7 +7,7 @@ class Translator(Protocol):
     async def stream(
         self,
         text: str,
-        context: list[tuple[str, str]] | None = None,
+        history: list[str] | None = None,
         draft: bool = False,
     ) -> AsyncIterator[str]: ...
 

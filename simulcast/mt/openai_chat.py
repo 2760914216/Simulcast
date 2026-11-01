@@ -8,16 +8,15 @@ from typing import AsyncIterator
 import httpx
 
 from ..config import ConfigError, MtProvider
-from .prompts import system_prompt
+from .prompts import system_prompt, user_message
 
 log = logging.getLogger(__name__)
 
 
 class OpenAiMt:
-    def __init__(self, provider: MtProvider, target_lang: str, context_sentences: int):
+    def __init__(self, provider: MtProvider, target_lang: str):
         self.provider = provider
         self.base_url = provider.base_url.rstrip("/")
-        self.context_sentences = max(0, context_sentences)
         self._system = system_prompt(target_lang)
         headers = {}
         if provider.api_key_env:
@@ -40,26 +39,23 @@ class OpenAiMt:
         except Exception:
             return False
 
-    def _messages(self, text: str, context: list[tuple[str, str]] | None) -> list[dict]:
-        msgs: list[dict] = [{"role": "system", "content": self._system}]
-        for src, tgt in (context or [])[-self.context_sentences :]:
-            if src and tgt:
-                msgs.append({"role": "user", "content": src})
-                msgs.append({"role": "assistant", "content": tgt})
-        msgs.append({"role": "user", "content": text})
-        return msgs
+    def _messages(self, text: str, history: list[str] | None) -> list[dict]:
+        return [
+            {"role": "system", "content": self._system},
+            {"role": "user", "content": user_message(text, history)},
+        ]
 
     async def stream(
         self,
         text: str,
-        context: list[tuple[str, str]] | None = None,
+        history: list[str] | None = None,
         draft: bool = False,
     ) -> AsyncIterator[str]:
         if not text.strip():
             return
         payload = {
             "model": self.provider.model,
-            "messages": self._messages(text, context),
+            "messages": self._messages(text, history),
             "temperature": self.provider.temperature,
             "top_p": 1.0,
             "max_tokens": self.provider.draft_max_tokens if draft else self.provider.max_tokens,

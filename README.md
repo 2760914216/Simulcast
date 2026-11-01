@@ -114,8 +114,8 @@ timeout_s = 30
 # api_key_env = "DASHSCOPE_API_KEY"   # 云端才需要，这里只写变量名
 ```
 
-`[mt]` 结构相同，额外有 `target_lang`、`context_sentences`、`emit_interval_ms`；provider 里多
-`draft_max_tokens`、`thinking`。
+`[mt]` 结构相同，额外有 `target_lang`、`context_sentences`、`context_max_chars`、`emit_interval_ms`；
+provider 里多 `draft_max_tokens`、`thinking`。
 
 - 换模型/端点：只改 `model` / `base_url`；
 - 换整套组合：新增 `profiles/*.toml`；
@@ -157,6 +157,15 @@ WebSocket `ws://127.0.0.1:8765`，每帧一个 UTF-8 JSON，**按 id upsert**，
 
 `eval` 会把"在线规则已提交的句子"和"整段全文重切的句子"对照，输出 `exact-match` 和
 `char premature`，用来判断切早了还是切晚了。
+
+## 翻译上下文（v1）
+
+- 历史只放**已提交的 ASR 原文**，不放历史译文，也不放当前句的上一个译文版本。
+- 上限两道：`mt.context_sentences` 句数（默认 2）、`mt.context_max_chars` 字符数（默认 2000）；
+  任一为 0 关闭历史，负值启动即报错。字符按实际拼进去的原文正文统计，不含提示词标签。
+- 最近一句自己就超字符上限时不截断、也不跳过它去取更早的句子，历史为空。
+- 原文一定稿就进历史，与翻译是否成功无关；快照在入队时固定，晚处理的句子看不到排在它后面的原文。
+- 请求形态是 `system` + 单条 `user`（`【前文】` / `【本次原文】` 分区），不构造 assistant 历史译文轮次。
 
 ## 渲染端
 

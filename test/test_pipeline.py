@@ -23,7 +23,7 @@ class StubAsr:
 
 
 class StubMt:
-    async def stream(self, text, context=None, draft=False):
+    async def stream(self, text, history=None, draft=False):
         for piece in ["译文", "：", text[-6:]]:
             yield piece
             await asyncio.sleep(0.01)

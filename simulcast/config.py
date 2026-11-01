@@ -79,6 +79,7 @@ class MtCfg:
     provider: str = ""
     target_lang: str = "简体中文"
     context_sentences: int = 2
+    context_max_chars: int = 2000
     emit_interval_ms: int = 180
     enabled: bool = True
     providers: dict[str, MtProvider] = field(default_factory=dict)
@@ -159,6 +160,9 @@ def _from_dict(data: dict[str, Any], profile: str) -> AppCfg:
     cfg.mt.provider = mt_data.get("provider", "")
     cfg.mt.target_lang = mt_data.get("target_lang", cfg.mt.target_lang)
     cfg.mt.context_sentences = int(mt_data.get("context_sentences", cfg.mt.context_sentences))
+    cfg.mt.context_max_chars = int(mt_data.get("context_max_chars", cfg.mt.context_max_chars))
+    if cfg.mt.context_sentences < 0 or cfg.mt.context_max_chars < 0:
+        raise ConfigError("mt.context_sentences and mt.context_max_chars must not be negative")
     cfg.mt.emit_interval_ms = int(mt_data.get("emit_interval_ms", cfg.mt.emit_interval_ms))
     cfg.mt.enabled = bool(mt_data.get("enabled", cfg.mt.enabled))
     for name, item in mt_data.get("providers", {}).items():
