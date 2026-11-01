@@ -8,6 +8,8 @@ from simulcast.config import AppCfg
 from simulcast.pipeline.orchestrator import Orchestrator
 from simulcast.sources import file_frames
 
+FIXTURE = pathlib.Path("test/fixtures/en.wav")
+
 
 class StubAsr:
     def __init__(self):
@@ -48,7 +50,7 @@ async def main():
     asr, sink = StubAsr(), Collect()
     orch = Orchestrator(cfg, asr, StubMt(), sink)
     await orch.start()
-    await orch.run(file_frames("test/en.wav", speed=20.0), source="file")
+    await orch.run(file_frames(FIXTURE, speed=20.0), source="file")
     await orch.finish()
     await orch.stop()
 
@@ -65,8 +67,8 @@ async def main():
     print("OK")
 
 
-if not pathlib.Path("test/en.wav").exists():
-    print("SKIP: test/en.wav not present")
+if not FIXTURE.exists():
+    print(f"SKIP: {FIXTURE} not present")
     raise SystemExit(0)
 
 asyncio.run(main())

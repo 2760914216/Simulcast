@@ -10,6 +10,8 @@ Windows 桌面端、本地优先的实时同声传译：把系统内录（或麦
 - MT：任意 chat 模型（默认 Qwen3.5-9B Q4）
 - 字幕：PySide6 悬浮窗，圆角卡片、点击穿透、可拖拽、双语 + 上一句
 
+现状、架构、局限和演进记录见 [`docs/current-state.md`](docs/current-state.md)。
+
 ## 特性
 
 - **全本地可跑**：录音、识别、翻译、字幕都在本机；不需要联网。
@@ -109,8 +111,9 @@ provider = "qwen3-local"
 type = "openai-chat"          # 目前只实现这一种
 base_url = "http://127.0.0.1:18091"
 model = "qwen3-asr"
-max_tokens = 512
+max_tokens = 256
 timeout_s = 30
+repeat_penalty = 1.05        # 高了解得开复读，太高会扰动正常段落
 # api_key_env = "DASHSCOPE_API_KEY"   # 云端才需要，这里只写变量名
 ```
 
@@ -209,15 +212,13 @@ RTX 5070 Ti Laptop（12 GB）上，两个本地服务同时常驻约 11.5 GB：
 ## 测试
 
 ```bash
-for t in test/test_config.py test/test_pipeline.py test/test_carry.py test/test_commit.py \
-         test/test_eval.py test/test_heuristics.py test/test_render_model.py \
-         test/test_render_behavior.py test/test_render_history.py test/test_render_interaction.py; do
-  PYTHONPATH=. .venv/Scripts/python.exe "$t" || break
-done
+for t in test/test_*.py; do PYTHONPATH=. .venv/Scripts/python.exe "$t" || break; done
 ```
 
-覆盖：配置合并/provider 解析、断句与 carried 文本、提交对齐、eval 指标、渲染端 store/拖拽/主题/历史。
-仓库只保留不依赖音频设备/模型服务的单元测试；需要真实服务或显示器的脚本（probe/capture/live）留在本机，不入库。
+覆盖：配置合并/provider 解析、断句与 carried 文本、提交对齐、eval 指标、ASR 守门与并发、
+翻译上下文（预算/顺序/目标排除/快照）、控制帧、总管进程管理与单实例、渲染端 store/拖拽/主题/历史。
+仓库只保留不依赖音频设备/模型服务的单元测试；需要真实服务或显示器的脚本留在本机，不入库。
+音频样本放 `test/fixtures/`（本地用 `tools/tts.ps1` 之类生成，同样不入库）。
 
 ## 已知限制
 
@@ -226,6 +227,7 @@ done
 - 只实现了 `openai-chat` 这一种方言；Qwen-MT（`translation_options`）和 DashScope ASR（multimodal）
   需要各自的适配器。
 - 只有 Windows 音频采集；没有 TTS、虚拟麦克风、说话人分离。
+- 双路（内录 + 麦克风）共用一个管道实例和一个翻译队列：两路的历史会互相串，也会互相排队。
 - 渲染端字幕窗固定置顶，不支持多屏同时显示。
 
 ## 目录
@@ -240,6 +242,9 @@ simulcast/
   render/    model textblock overlay handle theme qt cli
   protocol.py hub.py sink.py sources.py cli.py single.py store.py wsclient.py
 config/      default.toml profiles/ render.toml
+docs/        current-state.md（现状） vad-silero-study.md（VAD 选型实验）
 test/        单元与集成测试
-run.bat devices.bat
+test/fixtures/  音频样本（本地生成，不入库）
+tools/       devices.bat（列设备）+ 本机样本制作脚本
+run.bat
 ```

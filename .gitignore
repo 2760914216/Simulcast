@@ -5,18 +5,16 @@ __pycache__/
 .ignore/
 logs/
 runs/
-test/*.wav
+test/fixtures/*.wav
 
 # 本机专用，不进仓库
 vad_lab/
 scripts/serve-local.*
-config/local.toml
 AGENTS.md
-PLAN.md
-test/tts.ps1
-test/concat.py
-test/trim.py
-test/probe_asr.py
+tools/tts.ps1
+tools/concat.py
+tools/trim.py
+tools/probe_asr.py
 test/test_capture.py
 test/test_qt.py
 test/test_render_shot.py
