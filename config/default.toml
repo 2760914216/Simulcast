@@ -36,7 +36,8 @@ base_url = "http://127.0.0.1:18091"
 model = "qwen3-asr"
 max_tokens = 256
 timeout_s = 30.0
-repeat_penalty = 1.1
+# 实测：1.1 会在歌词段自造续写，1.05 既能解开死循环又不扰动正常段落
+repeat_penalty = 1.05
 
 [mt]
 provider = "qwen3-local"
