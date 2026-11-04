@@ -1,250 +1,180 @@
 # Simulcast · 同声传译
 
-- 这写的很 deepseek (吐槽)
+Windows 桌面实时字幕工具：采集系统声音或麦克风，通过 ASR 识别，再翻译成中文字幕。
+默认使用本机 Qwen3-ASR 与 Qwen3.5-9B，字幕由独立的 PySide6 悬浮窗显示。
 
-Windows 桌面端、本地优先的实时同声传译：把系统内录（或麦克风）里的英/日语，边说边变成中文字幕。
+支持本地离线运行，也可把翻译切换到兼容 Chat Completions 的云端服务。
+ASR 当前使用 llama.cpp 风格的音频 Chat Completions 接口，需要支持该输入格式的服务。
 
-识别和翻译都走 **OpenAI 兼容的 HTTP 接口**——默认接本机 llama.cpp，也可以换成任何兼容端点（ollama、DeepSeek、OpenAI…）。字幕渲染是**独立进程**，只通过 WebSocket 协议通信，换 UI 不用碰管道。
+详细架构、当前行为与局限见 [现状说明](docs/current-state.md)。
 
-- ASR：Qwen3-ASR（llama.cpp，支持音频输入）
-- MT：任意 chat 模型（默认 Qwen3.5-9B Q4）
-- 字幕：PySide6 悬浮窗，圆角卡片、点击穿透、可拖拽、双语 + 上一句
+## 当前能力
 
-现状、架构、局限和演进记录见 [`docs/current-state.md`](docs/current-state.md)。
-
-## 特性
-
-- **全本地可跑**：录音、识别、翻译、字幕都在本机；不需要联网。
-- **草稿–定稿双轨**：ASR 还在说话时就出草稿译文，判停后整段重解码定稿，字幕不会突然"跳"。
-- **句子级切分**：按标点切句，连续两次解码一致才提交；长句跨段接力，硬切不切在词中间。
-- **译文位只放译文**：新句译文到达前保留上一条，最多 1.2 s，避免中英来回闪。
-- **稳定前缀着色**：同一句里已确认的部分保持亮色，未稳定的尾巴用灰色，眼睛只需要盯句尾。
-- **可调外观**：字号、宽度、位置、历史句数、主题色；拖拽点可移动、可换大小。
-- **可观测**：每条字幕带 ASR/MT 耗时；`eval` 命令给出"切早了"的量化指标。
-
-## 架构
-
-```
-WASAPI loopback ┐
-                ├─► 16 kHz ─► VAD/分段 ─► ASR(draft/final) ─► 句子提交 ─► 翻译 ─► 字幕事件
-麦克风          ┘   soxr        burst       HTTP                LocalAgreement   HTTP      │
-                                                                                          ▼
-                                                              WebSocket 协议 ──► 渲染端（PySide6）
-                                                                              └─► JSONL / SRT / MD
-```
-
-三个进程，各司其职：
-
-| 进程 | 入口 | 职责 |
-|---|---|---|
-| 总管 | `python -m simulcast.app` | 托盘、子进程生命周期、配置下发、单实例 |
-| 识别引擎 | `python -m simulcast.cli run --live … --ws` | 采集 → 识别 → 翻译 → 字幕事件 |
-| 字幕引擎 | `python -m simulcast.render.qt` | 订阅协议，渲染悬浮字幕 |
-
-总管用 Windows Job Object 把两个引擎绑在自己身上：总管被强杀时引擎一起退出，不留孤儿进程。
-第二次启动只唤醒已有实例，然后自己退出。
+- 系统内录、麦克风或双路采集；默认跟随 Windows 默认设备，也可在托盘指定设备。
+- ASR 草稿持续更新；首轮译文流式显示，已有译文后的重译先缓冲、完成后一次替换，避免反复退回开头几个字。
+- 10 秒 ASR 窗口与逻辑句子分离，硬切保留 1.5 秒重叠，待完成句子跨窗沿用同一字幕 ID。
+- 翻译参考前两句已提交的原文；入队时冻结原文、上下文和版本，过时翻译不覆盖新版本。
+- 置顶双语悬浮窗、点击穿透、圆形拖拽点；可调字号、宽度、历史句数及原文显示。
+- 托盘管理识别与字幕进程，支持重启、停止、单实例及崩溃重试。
+- WAV 回放、JSONL 事件记录、双语稿与 SRT 导出、断句评估。
+- 可选本地 Silero 语音证据观测，默认关闭；当前不根据观测分数自动过滤字幕。
 
 ## 快速开始
 
-### 1. 环境
+### 环境
 
-- Windows 10/11（音频采集依赖 WASAPI）
-- Python 3.13
-- 一个 OpenAI 兼容的 LLM 服务（下例用 llama.cpp）
+需要 Windows 10/11、Python 3.11 及以上版本（本机测试使用 3.13），以及支持所选模型的推理服务。
+本地模型所需显存取决于量化、上下文长度和服务配置；模型文件需自行准备。
 
-```bash
+在仓库根目录用 PowerShell 执行：
+
+```powershell
 uv venv .venv
 uv pip install --python .venv/Scripts/python.exe -r requirements.txt
 ```
 
-### 2. 启动模型服务
+### 启动模型服务
 
-应用**不负责**启动服务，需手动开启，示例：
+应用管理采集和字幕进程，模型服务需要单独启动。
+默认地址为 ASR `http://127.0.0.1:18091`、MT `http://127.0.0.1:18092`。
+以下为 llama.cpp 示例，模型路径与参数请按本机版本调整：
 
-```bash
-llama-server -m Qwen3-ASR-1.7B-Q8_0.gguf \
-             -mm Qwen3-ASR-1.7B-mmproj-f16.gguf \
-             --host 127.0.0.1 --port 18091 -ngl 99 -c 4096 --jinja
+```powershell
+llama-server -m Qwen3-ASR-1.7B-Q8_0.gguf `
+  -mm Qwen3-ASR-1.7B-mmproj-f16.gguf `
+  --host 127.0.0.1 --port 18091 -ngl 99 -c 4096 --jinja
 
-llama-server -m Qwen3.5-9B-Q4_K_M.gguf \
-             --host 127.0.0.1 --port 18092 -ngl 99 -c 4096 --jinja -fa on
+llama-server -m Qwen3.5-9B-Q4_K_M.gguf `
+  --host 127.0.0.1 --port 18092 -ngl 99 -c 4096 --jinja -fa on
 ```
 
-### 3. 运行
+两条命令分别运行在两个终端中。模型名称、端口等配置见 `config/default.toml`。
 
-```bat
-run.bat            :: 启动总管（托盘 + 两个引擎）
+### 运行
+
+```powershell
+.\run.bat
 ```
 
-内录 / 麦克风 / 双路在托盘「识别 → 采集源」里切换，切换会重启识别引擎。也可以直接起引擎：
+托盘中可切换内录、麦克风和双路采集，以及调整字幕样式。
+也可在两个终端分别启动识别与字幕引擎：
 
-或直接命令行：
-
-```bash
-PYTHONPATH=. .venv/Scripts/python.exe -m simulcast.cli run --live loopback
-PYTHONPATH=. .venv/Scripts/python.exe -m simulcast.render.qt --ws ws://127.0.0.1:8765
+```powershell
+& .venv/Scripts/python.exe -m simulcast.cli run --live loopback --ws
+& .venv/Scripts/python.exe -m simulcast.render.qt --ws ws://127.0.0.1:8765
 ```
 
-渲染端也可以先起，会自动重连。没有服务端时用 `--demo` 预览样式。
+字幕端可先启动，连接断开时会重连；`--demo` 可在没有识别服务时预览样式。
 
 ## 配置
 
-```
+```text
 config/
-├─ default.toml          # provider 定义与默认参数，不含机器路径/密钥
-├─ profiles/
-│  ├─ local.toml         # 默认：本地 ASR + 本地 MT
-│  └─ cloud-mt.toml      # 本地 ASR + DeepSeek 翻译
-└─ render.toml           # 渲染端出厂默认（窗口 + 主题）
+  default.toml           默认参数与服务定义
+  profiles/local.toml    本地 ASR + 本地翻译
+  profiles/cloud-mt.toml 本地 ASR + DeepSeek 翻译
+  render.toml            字幕出厂样式
 ```
 
-加载顺序：`default.toml` → `profiles/<name>.toml`（深合并，只写差异）。字幕端的样式写在
-`%APPDATA%\simulcast\render.json`：字幕引擎负责落盘，总管读取后显示为勾选状态，覆盖 `render.toml`。
+配置按 `default.toml` → `profiles/<name>.toml` 深合并。
+运行时字幕样式保存在 `%APPDATA%\simulcast\render.json`，覆盖出厂样式。
+密钥只通过配置指定的环境变量读取。
 
-### provider
-
-```toml
-[asr]
-provider = "qwen3-local"
-
-[asr.providers.qwen3-local]
-type = "openai-chat"          # 目前只实现这一种
-base_url = "http://127.0.0.1:18091"
-model = "qwen3-asr"
-max_tokens = 256
-timeout_s = 30
-repeat_penalty = 1.05        # 高了解得开复读，太高会扰动正常段落
-# api_key_env = "DASHSCOPE_API_KEY"   # 云端才需要，这里只写变量名
+```powershell
+# 可选云端翻译：先在当前环境设置 DEEPSEEK_API_KEY
+& .venv/Scripts/python.exe -m simulcast.cli run --live loopback --profile cloud-mt --ws
 ```
 
-`[mt]` 结构相同，额外有 `target_lang`、`context_sentences`、`context_max_chars`、`emit_interval_ms`；
-provider 里多 `draft_max_tokens`、`thinking`。
+主要参数：
 
-- 换模型/端点：只改 `model` / `base_url`；
-- 换整套组合：新增 `profiles/*.toml`；
-- 密钥只走环境变量，缺失时启动即报错。
+| 配置 | 默认值 | 用途 |
+|---|---|---|
+| `segment.draft_interval_ms` | 900 | 草稿识别触发间隔 |
+| `segment.silence_ms` | 450 | VAD 静音判停时长 |
+| `segment.max_segment_s` | 10 | 单个常规 ASR 音频窗口上限 |
+| `segment.window_overlap_s` | 1.5 | 硬切后的重叠音频 |
+| `segment.utterance_max_s` / `utterance_max_chars` | 30 / 1000 | 待完成句子的预算 |
+| `mt.context_sentences` / `context_max_chars` | 2 / 2000 | 翻译原文上下文预算；任一为 0 关闭 |
+| `asr.speech_evidence_mode` | `off` | 设为 `observe` 可开启语音证据旁路 |
 
-```bash
-python -m simulcast.cli run --live loopback --profile local
-python -m simulcast.cli run --live loopback --profile cloud-mt    # 需要 DEEPSEEK_API_KEY
+语音证据观测另需安装 `onnxruntime`，并配置本地 Silero ONNX 模型路径
+`asr.speech_evidence_model`。常规运行无需这些可选依赖。
+
+## 数据流与字幕协议
+
+```text
+采集 → 能量 VAD → 重叠音频窗口 → 同源串行 ASR → 逻辑句子 → 翻译队列
+                                                              ↓
+                      PySide6 悬浮窗 ← WebSocket ← 字幕事件 → JSONL
 ```
 
-## 字幕协议 v1
+总管 `simulcast.app` 管理识别引擎 `simulcast.cli` 与字幕引擎 `simulcast.render.qt`。
+Windows Job Object 绑定子进程生命周期，避免总管退出后留下引擎进程。
 
-WebSocket `ws://127.0.0.1:8765`，每帧一个 UTF-8 JSON，**按 id upsert**，渲染端无状态可重连。
+WebSocket 默认地址为 `ws://127.0.0.1:8765`。客户端按字幕 `id` 更新内容，连接时接收快照：
 
 ```json
-{"v":1,"type":"snapshot","captions":[...]}
-{"v":1,"type":"caption","id":"loopback-0003-s2","source":"loopback",
- "t0":3.1,"t1":5.4,"raw":"Today, we will discuss…","translation":"今天，我们将讨论……",
- "state":"final","lang":"English","asr_ms":168,"mt_ms":192,"seq":41,"sid":"20261017T…"}
+{"v":1,"type":"caption","id":"u1","source":"loopback","t0":3.1,"t1":null,"raw":"Today we discuss…","translation":"今天我们讨论……","state":"draft","lang":"English","asr_ms":168,"mt_ms":192,"seq":41,"sid":"session-id"}
 ```
 
-| 字段 | 含义 |
-|---|---|
-| `sid` | 一次 `run` 的会话 ID |
-| `id` | `loopback-0003` 是 burst 草稿行，`loopback-0003-s2` 是该 burst 的第 2 句定稿 |
-| `t0` / `t1` | 音频时间轴上的起止；`t1=null` 表示还在增长 |
-| `raw` / `translation` | ASR 文本 / 译文 |
-| `state` | `draft` 边说边译，`final` 该句定稿 |
-| `asr_ms` / `mt_ms` | 本次请求耗时 |
+`u1`、`u2` 等是会话内逻辑句子的 ID，跨音频窗口保持不变。
+`draft` 可修订，`final` 表示已确认结束；`t1=null` 表示尚未定稿。
+`utterance_boundary`、`asr_repair`、`asr_observation` 等事件用于诊断，不作为字幕显示。
 
-## 断句模型
+## 回放与导出
 
-1. **burst**：VAD 判停（450 ms 静音）或超过 10 s 才结束一段；≤450 ms 的换气不会断句。
-2. **句子提交**：每次解码按标点切句，某句连续两次解码一致（LocalAgreement-2）才成为 `final`；
-   当前正在说的那句留在 `draft` 上滚动。tick 阶段**永不提交最后一句**，避免把截断的句子定稿。
-3. **跨段接力**：硬切时量切点静音长度——≥120 ms 视为真停顿；否则把这半句剥掉尾标点后挂起，
-   拼到下一段识别结果前。挂起文本 20 s 过期、12–200 字符、≤8 词（或以上下文连接词结尾）。
-4. **保真优先**：`segment.semantic_heuristics = false`（默认）时只做机械处理，不在文本层猜语义。
-
-`eval` 会把"在线规则已提交的句子"和"整段全文重切的句子"对照，输出 `exact-match` 和
-`char premature`，用来判断切早了还是切晚了。
-
-## 翻译上下文（v1）
-
-- 历史只放**已提交的 ASR 原文**，不放历史译文，也不放当前句的上一个译文版本。
-- 上限两道：`mt.context_sentences` 句数（默认 2）、`mt.context_max_chars` 字符数（默认 2000）；
-  任一为 0 关闭历史，负值启动即报错。字符按实际拼进去的原文正文统计，不含提示词标签。
-- 最近一句自己就超字符上限时不截断、也不跳过它去取更早的句子，历史为空。
-- 原文一定稿就进历史，与翻译是否成功无关；快照在入队时固定，晚处理的句子看不到排在它后面的原文。
-- 请求形态是 `system` + 单条 `user`（`【前文】` / `【本次原文】` 分区），不构造 assistant 历史译文轮次。
-
-## 渲染端
-
-- 近黑半透明卡片、圆角、左侧连接状态点（白=已连接，灰=断开）。
-- 当前句：原文小字 + 译文大字；可选择保留 0/1/2 句历史（只留译文，单行省略）。
-- 稳定前缀亮色、未定尾巴灰色；180 ms 合并窗口，final 立即生效。
-- 卡片点击穿透；右侧圆形拖拽点可移动位置，位置按"横向比例 + 底部距离"保存。
-- 托盘属于总管，分两组：
-  - **字幕**：字号、宽度、历史句数、拖拽点大小、显示原文、重启/停止字幕引擎
-  - **识别**：采集源、系统声音与麦克风设备、重启/停止识别引擎
-- 样式改动经 WebSocket 控制帧下发（`target=render`），字幕引擎应用后落盘到 `render.json`。
-- 采集设备：默认跟随 Windows 的默认输出设备，换耳机/切显示器后自动重开流（约 0.3-1 s 空档）；
-  也可在托盘里指定设备固定下来，选择优先于自动跟随（控制帧 `target=pipeline`）。
-
-## CLI
-
-```bash
-python -m simulcast.cli devices                      # 列出内录/麦克风
-python -m simulcast.cli run --live both --ws          # 双路 + 字幕总线
-python -m simulcast.cli run --input a.wav --speed 1   # 实时回放 wav
-python -m simulcast.cli serve                         # 只跑字幕总线
-python -m simulcast.cli export a.jsonl --list         # 查看文件里的会话
-python -m simulcast.cli export a.jsonl -o a.md        # 折叠成双语稿
-python -m simulcast.cli export a.jsonl --format srt   # 导出字幕
-python -m simulcast.cli eval a.jsonl --worst 5        # 断句质量报告
+```powershell
+& .venv/Scripts/python.exe -m simulcast.cli devices
+& .venv/Scripts/python.exe -m simulcast.cli run --input a.wav --speed 1 --out a.jsonl
+& .venv/Scripts/python.exe -m simulcast.cli export a.jsonl --list
+& .venv/Scripts/python.exe -m simulcast.cli export a.jsonl -o a.md
+& .venv/Scripts/python.exe -m simulcast.cli export a.jsonl --format srt -o a.srt
+& .venv/Scripts/python.exe -m simulcast.cli eval a.jsonl --worst 5
 ```
 
-常用参数：`--profile`、`--out`（追加写，`--fresh` 截断）、`--no-mt`、`--max-seconds`、`--quiet`。
-
-## 实测
-
-RTX 5070 Ti Laptop（12 GB）上，两个本地服务同时常驻约 11.5 GB：
-
-| 指标 | 值 |
-|---|---|
-| ASR 单次解码（1–7 s 音频） | 85–340 ms |
-| MT 单句（含首 token） | 80–280 ms |
-| 说话中首条译文 | 1.2–1.5 s |
-| 停顿后定稿替换 | 0.2–0.5 s |
+JSONL 默认追加写入；使用 `--fresh` 清空后重写。导出默认仅包含定稿，`--all` 可包含草稿。
 
 ## 测试
 
-```bash
-for t in test/test_*.py; do PYTHONPATH=. .venv/Scripts/python.exe "$t" || break; done
+```powershell
+& .venv/Scripts/python.exe tools/check.py
+# 仅运行指定测试脚本
+& .venv/Scripts/python.exe tools/check.py test_mt_display test_pipeline_shutdown
 ```
 
-覆盖：配置合并/provider 解析、断句与 carried 文本、提交对齐、eval 指标、ASR 守门与并发、
-翻译上下文（预算/顺序/目标排除/快照）、控制帧、总管进程管理与单实例、渲染端 store/拖拽/主题/历史。
-仓库只保留不依赖音频设备/模型服务的单元测试；需要真实服务或显示器的脚本留在本机，不入库。
-音频样本放 `test/fixtures/`（本地用 `tools/tts.ps1` 之类生成，同样不入库）。
+测试入口为每个脚本建立独立 Python 进程，使用离屏 Qt，并设置超时。
+2026-11-04 本机完整检查为 **37 个脚本通过，0 失败、0 跳过**。
+这些回归不依赖真实模型服务和音频设备，不代表真实长句翻译与背景音幻觉已完成验收。
 
 ## 已知限制
 
-- ASR 不返回词级时间戳，句子时间是按字符比例估算的（srt 可用，逐字高亮不够）。
-- 句界依赖 ASR 标点；长句硬切后若尾巴较长，仍可能被切成两句。
-- 只实现了 `openai-chat` 这一种方言；Qwen-MT（`translation_options`）和 DashScope ASR（multimodal）
-  需要各自的适配器。
-- 只有 Windows 音频采集；没有 TTS、虚拟麦克风、说话人分离。
-- 双路（内录 + 麦克风）共用一个管道实例和一个翻译队列：两路的历史会互相串，也会互相排队。
-- 渲染端字幕窗固定置顶，不支持多屏同时显示。
+- 跨窗文字对齐依赖启发式规则，歧义、模型漏字和预算耗尽仍可能导致重复或分句。
+  自然连续长句还缺少人工标注实录验收。
+- 背景音幻觉尚未解决。已有 ASR 退化守门与可选语音证据观测，尚无经过独立验证的声学自动拦截策略。
+- ASR 无词级时间戳，句子时间按文字比例估计；停顿与标点不能保证语义句界。
+- 后续重译需要等该次翻译完成才替换显示；慢服务会延迟更新，翻译队列在持续过载下仍可能增长。
+- 双路采集的句子与音频状态独立，但共用翻译队列和已提交原文历史，可能互相排队、影响上下文。
+- 仅实现 `openai-chat` 适配器；不同服务的音频输入、健康检查和扩展参数需要核对兼容性。
+- 音频采集只支持 Windows；没有 TTS、虚拟麦克风、说话人分离和多屏同时显示。
 
-## 目录
+## 仓库目录
 
+```text
+simulcast/  采集、ASR、翻译、管道、字幕渲染与托盘总管
+config/     默认配置与服务组合
+docs/       当前代码的说明
+test/       单元与集成回归
+tools/      测试入口与设备工具
+run.bat     桌面启动入口
+LICENSE     MIT 许可证
 ```
-simulcast/
-  app/       tray supervisor __main__（总管：托盘 + 生命周期）
-  audio/     devices capture vad segmenter wavio
-  asr/       base（协议 + Streaming 扩展点） openai_chat
-  mt/        base openai_chat prompts sanitize
-  pipeline/  sentences orchestrator（双轨调度、背压、上下文）
-  render/    model textblock overlay handle theme qt cli
-  protocol.py hub.py sink.py sources.py cli.py single.py store.py wsclient.py
-config/      default.toml profiles/ render.toml
-docs/        current-state.md（现状） vad-silero-study.md（VAD 选型实验）
-test/        单元与集成测试
-test/fixtures/  音频样本（本地生成，不入库）
-tools/       devices.bat（列设备）+ 本机样本制作脚本
-run.bat
-```
+
+设计、交接、实现计划、实验和验证记录保存在本机 `.ignore/development-docs/`；
+原根目录的 `TODO.md` 也已移入该目录。`docs/superpower/`、`docs/superpowers/`、
+重新创建的根目录 `TODO.md`、模型、音频样本和运行产物均不入库。
+
+## 许可
+
+本仓库代码采用 [MIT 许可证](LICENSE)，允许商用、修改、再分发与再许可，需保留版权和许可声明。
+模型权重、推理服务及第三方依赖适用各自许可，不包含在本项目的 MIT 授权中。
+例如 PySide6/Qt 与 soxr 含 LGPL 等许可要求；分发包含这些组件的程序时需遵守相应条款。

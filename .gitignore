@@ -19,4 +19,9 @@ test/test_capture.py
 test/test_qt.py
 test/test_render_shot.py
 test/test_render_live.py
-TODO.md
+# 开发文档与待办只保存在本机；正式文档放 docs/
+/.ignore/development-docs/
+/docs/superpower/
+/docs/superpowers/
+/TODO
+/TODO.md

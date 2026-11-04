@@ -456,10 +456,16 @@ class Orchestrator:
         buf = ""
         last_emit = 0.0
         interval = self.cfg.mt.emit_interval_ms / 1000.0
+        # Keep the visible draft while its replacement is being generated.
+        # Only the first translation streams onto an empty caption; subsequent
+        # drafts replace it atomically after completion and the revision check.
+        buffer_draft = not final and bool(seg.translation)
         async for delta in self.mt.stream(text, list(history), draft=not final):
             if rev != seg.mt_rev:
                 return
             buf += delta
+            if buffer_draft:
+                continue
             candidate = clean(buf, partial=True)
             if candidate and (seg.translation_raw != text or not seg.translation
                               or len(candidate) >= 0.8 * len(seg.translation)):
